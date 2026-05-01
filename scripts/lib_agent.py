@@ -65,8 +65,8 @@ def validate_openrouter_model(model_id: str, timeout_seconds: float = 10.0) -> b
     if bare_model_id.startswith("openrouter/"):
         bare_model_id = bare_model_id[len("openrouter/") :]
 
-    # Skip validation for non-OpenRouter models
-    if "/" not in bare_model_id:
+    # Skip validation for non-OpenRouter models (but not ones with an explicit openrouter/ prefix)
+    if "/" not in bare_model_id and not model_id.startswith("openrouter/"):
         logger.info("Skipping model validation for non-OpenRouter model: %s", model_id)
         return True
 
