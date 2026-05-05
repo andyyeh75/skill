@@ -65,13 +65,13 @@ sessions:
         ]
       }
 workspace_files:
-  - source: assets/session_chain/session.ts
+  - source: session_chain/session.ts
     dest: session.ts
-  - source: assets/session_chain/session-store.ts
+  - source: session_chain/session-store.ts
     dest: session-store.ts
-  - source: assets/session_chain/delivery.ts
+  - source: session_chain/delivery.ts
     dest: delivery.ts
-  - source: assets/session_chain/agent-command.ts
+  - source: session_chain/agent-command.ts
     dest: agent-command.ts
 ---
 
