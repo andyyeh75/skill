@@ -104,6 +104,15 @@ class AxiomLogger:
             instance_ip=self.instance_ip or None,
             **kwargs,
         )
+
+    def heartbeat(self, current_task: Optional[str] = None, uptime_ms: Optional[int] = None) -> None:
+        """Log a heartbeat event to indicate instance is still alive."""
+        event = self._make_event(
+            "heartbeat",
+            task_id=current_task,
+            extra={"uptime_ms": uptime_ms} if uptime_ms else None,
+        )
+        self._send_immediate(event)
     
     def _send_batch(self, events: List[Dict[str, Any]]) -> bool:
         """Send a batch of events to Axiom. Returns True on success."""
