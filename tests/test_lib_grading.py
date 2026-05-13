@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -12,8 +13,10 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 from lib_grading import (  # noqa: E402
     _combine_grades,
+    _compute_cache_key,
     _normalize_judge_response,
     _parse_judge_response,
+    _read_workspace_files,
     GradeResult,
 )
 
@@ -145,6 +148,38 @@ class JudgeNormalizationTests(unittest.TestCase):
 
         self.assertEqual(parsed["scores"]["clarity"], 0.75)
         self.assertEqual(parsed["total"], 0.8)
+
+
+class WorkspaceFilesForJudgeTests(unittest.TestCase):
+    def test_read_workspace_files_preserves_full_text_file_content(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            long_content = "A" * 3000 + "TAIL_MARKER"
+            (workspace / "report.md").write_text(long_content, encoding="utf-8")
+
+            content = _read_workspace_files(str(workspace))
+
+        self.assertIn("### File: report.md", content)
+        self.assertIn("TAIL_MARKER", content)
+        self.assertIn(long_content, content)
+
+    def test_compute_cache_key_changes_when_workspace_content_changes(self) -> None:
+        first_key = _compute_cache_key(
+            "task_report",
+            "same transcript",
+            "same rubric",
+            "same model",
+            "workspace version one",
+        )
+        second_key = _compute_cache_key(
+            "task_report",
+            "same transcript",
+            "same rubric",
+            "same model",
+            "workspace version two",
+        )
+
+        self.assertNotEqual(first_key, second_key)
 
 
 if __name__ == "__main__":

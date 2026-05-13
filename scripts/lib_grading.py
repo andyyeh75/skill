@@ -26,7 +26,7 @@ DEFAULT_JUDGE_AGENT_PREFIX = "bench-judge"
 DEFAULT_JUDGE_TIMEOUT_SECONDS = 300
 
 # Judge result cache: maps cache_key -> GradeResult dict
-# Cache key = hash of (task_id, transcript_summary, rubric, judge_model)
+# Cache key = hash of (task_id, transcript_summary, rubric, judge_model, workspace_content)
 _judge_cache: Dict[str, Dict[str, Any]] = {}
 _judge_cache_dir: Optional[Path] = None
 
@@ -65,9 +65,15 @@ def _save_judge_cache() -> None:
         logger.warning(f"Failed to save judge cache: {e}")
 
 
-def _compute_cache_key(task_id: str, transcript: str, rubric: str, model: str) -> str:
+def _compute_cache_key(
+    task_id: str,
+    transcript: str,
+    rubric: str,
+    model: str,
+    workspace_content: str = "",
+) -> str:
     """Compute a cache key from grading inputs."""
-    content = f"{task_id}|{transcript}|{rubric}|{model}"
+    content = f"{task_id}|{transcript}|{rubric}|{model}|{workspace_content}"
     return hashlib.sha256(content.encode()).hexdigest()[:16]
 
 
@@ -288,7 +294,13 @@ def _grade_llm_judge(
     rubric = task.llm_judge_rubric or _format_grading_criteria(task)
     
     # Check cache before calling judge
-    cache_key = _compute_cache_key(task.task_id, transcript_summary, rubric, judge_model)
+    cache_key = _compute_cache_key(
+        task.task_id,
+        transcript_summary,
+        rubric,
+        judge_model,
+        workspace_content,
+    )
     if cache_key in _judge_cache:
         cached = _judge_cache[cache_key]
         if verbose:
@@ -534,7 +546,7 @@ def _read_workspace_files(workspace_path: str) -> str:
             continue
         try:
             content = f.read_text(encoding="utf-8")
-            file_contents.append(f"### File: {rel}\n{content[:3000]}")
+            file_contents.append(f"### File: {rel}\n{content}")
         except (OSError, UnicodeDecodeError):
             pass
     return "\n\n".join(file_contents)
