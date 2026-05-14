@@ -116,6 +116,9 @@ By default (no `--judge` flag), the LLM judge runs as an OpenClaw agent session.
 # Direct API via OpenRouter
 ./scripts/run.sh --model openai/gpt-4o --judge openrouter/anthropic/claude-sonnet-4-5
 
+# Direct API via Kilo Gateway
+./scripts/run.sh --model openai/gpt-4o --judge kilo/anthropic/claude-sonnet-4-5
+
 # Direct API via Anthropic
 ./scripts/run.sh --model openai/gpt-4o --judge anthropic/claude-sonnet-4-5-20250514
 
@@ -126,7 +129,7 @@ By default (no `--judge` flag), the LLM judge runs as an OpenClaw agent session.
 ./scripts/run.sh --model openai/gpt-4o --judge claude
 ```
 
-Required env vars: `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, or `OPENAI_API_KEY` depending on the judge model prefix.
+Required env vars: `OPENROUTER_API_KEY`, `KILO_API_KEY`, `ANTHROPIC_API_KEY`, or `OPENAI_API_KEY` depending on the judge model prefix.
 
 ## Contributing Tasks
 
@@ -164,4 +167,3 @@ MIT — see [LICENSE](LICENSE) for details.
 ---
 
 _Claw-some AI agent testing_ 🦞
-

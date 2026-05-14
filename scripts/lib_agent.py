@@ -1185,6 +1185,7 @@ def call_judge_api(
 
     Dispatches based on model prefix:
       - openrouter/* -> OpenRouter chat completions API
+      - kilo/*       -> Kilo Gateway chat completions API
       - anthropic/*  -> Anthropic Messages API
       - openai/*     -> OpenAI chat completions API
       - claude       -> headless Claude CLI (claude -p)
@@ -1193,6 +1194,8 @@ def call_judge_api(
     """
     if model == "claude" or model.startswith("claude:"):
         return _judge_via_claude_cli(prompt, model, timeout_seconds)
+    if model.startswith("kilo/"):
+        return _judge_via_kilo(prompt, model, timeout_seconds)
     if model.startswith("anthropic/"):
         return _judge_via_anthropic(prompt, model, timeout_seconds)
     if model.startswith("openai/"):
@@ -1262,6 +1265,20 @@ def _judge_via_openrouter(prompt: str, model: str, timeout_seconds: float) -> Di
         "https://openrouter.ai/api/v1/chat/completions",
         api_key, timeout_seconds,
         extra_headers={"HTTP-Referer": "https://pinchbench.com", "X-Title": "PinchBench-Judge"},
+    )
+
+
+def _judge_via_kilo(prompt: str, model: str, timeout_seconds: float) -> Dict[str, Any]:
+    api_key = os.environ.get("KILO_API_KEY")
+    if not api_key:
+        return {"status": "error", "text": "", "error": "KILO_API_KEY not set"}
+    bare_model = model.removeprefix("kilo/")
+    return _judge_via_openai_compat(
+        prompt,
+        bare_model,
+        "https://api.kilo.ai/api/gateway/chat/completions",
+        api_key,
+        timeout_seconds,
     )
 
 
