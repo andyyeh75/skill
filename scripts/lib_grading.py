@@ -198,10 +198,31 @@ def _grade_automated(
             notes="Automated grading function missing",
         )
 
-    scores = grade_func(
-        execution_result.get("transcript", []),
-        execution_result.get("workspace", ""),
+    workspace_path = execution_result.get("workspace", "")
+    transcript = _normalize_transcript_content_blocks(
+        execution_result.get("transcript", [])
     )
+    try:
+        scores = grade_func(
+            transcript,
+            workspace_path,
+        )
+    except FileNotFoundError as exc:
+        # Some embedded automated graders assume POSIX shell/temp-path behavior.
+        # On Windows this can surface as WinError 3 even when the agent output is
+        # present.  Keep the normal grader for all platforms, but use a
+        # Windows-safe fallback for the git rescue task so local Windows runs are
+        # comparable to official/Linux runs.
+        if task.task_id == "task_git_rescue_recovery" and os.name == "nt":
+            logger.warning(
+                "Automated grader for %s hit Windows path error; using Windows-safe fallback: %s",
+                task.task_id,
+                exc,
+            )
+            scores = _grade_git_rescue_recovery_windows_safe(workspace_path)
+        else:
+            raise
+
     if not isinstance(scores, dict):
         scores = {}
 
@@ -477,6 +498,34 @@ def _normalize_score_dict(scores: Dict[str, Any]) -> Dict[str, float]:
     return normalized
 
 
+def _normalize_transcript_content_blocks(transcript: Any) -> List[Dict[str, Any]]:
+    if not isinstance(transcript, list):
+        return []
+
+    normalized: List[Dict[str, Any]] = []
+    for event in transcript:
+        if not isinstance(event, dict):
+            continue
+        event_copy = dict(event)
+        msg = event_copy.get("message")
+        if isinstance(msg, dict):
+            msg_copy = dict(msg)
+            content = msg_copy.get("content", [])
+            if isinstance(content, str):
+                msg_copy["content"] = [{"type": "text", "text": content}]
+            elif isinstance(content, list):
+                msg_copy["content"] = [
+                    {"type": "text", "text": item} if isinstance(item, str) else item
+                    for item in content
+                    if isinstance(item, (dict, str))
+                ]
+            else:
+                msg_copy["content"] = []
+            event_copy["message"] = msg_copy
+        normalized.append(event_copy)
+    return normalized
+
+
 def _format_grading_criteria(task: Task) -> str:
     if not task.grading_criteria:
         return ""
@@ -485,7 +534,7 @@ def _format_grading_criteria(task: Task) -> str:
 
 def _summarize_transcript(transcript: List[Dict[str, Any]]) -> str:
     summary_parts: List[str] = []
-    for event in transcript:
+    for event in _normalize_transcript_content_blocks(transcript):
         if event.get("type") != "message":
             continue
         msg = event.get("message", {})

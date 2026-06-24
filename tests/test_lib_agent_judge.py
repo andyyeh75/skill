@@ -13,20 +13,26 @@ SCRIPTS_DIR = ROOT / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from lib_agent import call_judge_api  # noqa: E402
+from lib_agent import _ollama_native_chat_endpoint, call_judge_api  # noqa: E402
 
 
 class _FakeResponse:
+    def __init__(self, body: dict | None = None, lines: list[dict] | None = None) -> None:
+        self.body = body or {"choices": [{"message": {"content": '{"total": 1.0}'}}]}
+        self.lines = lines or []
+
     def __enter__(self) -> "_FakeResponse":
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
         return None
 
+    def __iter__(self):
+        for line in self.lines:
+            yield json.dumps(line).encode("utf-8") + b"\n"
+
     def read(self) -> bytes:
-        return json.dumps(
-            {"choices": [{"message": {"content": '{"total": 1.0}'}}]}
-        ).encode("utf-8")
+        return json.dumps(self.body).encode("utf-8")
 
 
 class KiloJudgeTests(unittest.TestCase):
@@ -96,6 +102,112 @@ class KiloJudgeTests(unittest.TestCase):
             "test-key",
             30,
         )
+
+
+class OllamaJudgeTests(unittest.TestCase):
+    def test_call_judge_api_ollama_posts_to_native_chat_endpoint_without_auth(self) -> None:
+        captured_request = None
+
+        def fake_urlopen(req, timeout):
+            nonlocal captured_request
+            captured_request = req
+            self.assertEqual(timeout, 9.0)
+            return _FakeResponse({"message": {"content": '{"total": 1.0}'}})
+
+        with patch.dict(os.environ, {}, clear=True), patch(
+            "lib_agent.request.urlopen", side_effect=fake_urlopen
+        ):
+            result = call_judge_api(
+                prompt="grade this",
+                model="ollama/llama3.1",
+                timeout_seconds=9.0,
+            )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["text"], '{"total": 1.0}')
+        self.assertIsNotNone(captured_request)
+        self.assertEqual(captured_request.full_url, "http://localhost:11434/api/chat")
+        self.assertNotIn("Authorization", captured_request.headers)
+
+        payload = json.loads(captured_request.data.decode("utf-8"))
+        self.assertEqual(payload["model"], "llama3.1")
+        self.assertEqual(payload["format"], "json")
+        self.assertIs(payload["stream"], False)
+        self.assertEqual(payload["options"]["temperature"], 0.0)
+        self.assertEqual(payload["options"]["num_predict"], 2048)
+        self.assertNotIn("max_tokens", payload)
+        self.assertNotIn("max_completion_tokens", payload)
+        self.assertNotIn("keep_alive", payload)
+        self.assertEqual(payload["messages"][1], {"role": "user", "content": "grade this"})
+
+    def test_call_judge_api_ollama_applies_memory_options_from_env(self) -> None:
+        captured_request = None
+
+        def fake_urlopen(req, timeout):
+            nonlocal captured_request
+            captured_request = req
+            return _FakeResponse({"message": {"content": '{"total": 0.75}'}})
+
+        env = {
+            "OLLAMA_BASE_URL": "http://example.test:11434/v1",
+            "OLLAMA_API_KEY": "proxy-key",
+            "OLLAMA_JUDGE_NUM_CTX": "4096",
+            "OLLAMA_JUDGE_NUM_PREDICT": "512",
+            "OLLAMA_JUDGE_KEEP_ALIVE": "0",
+        }
+        with patch.dict(os.environ, env, clear=True), patch(
+            "lib_agent.request.urlopen", side_effect=fake_urlopen
+        ):
+            result = call_judge_api(
+                prompt="grade this",
+                model="ollama/qwen3-coder:30b",
+            )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["text"], '{"total": 0.75}')
+        self.assertEqual(captured_request.full_url, "http://example.test:11434/api/chat")
+        self.assertEqual(captured_request.headers["Authorization"], "Bearer proxy-key")
+
+        payload = json.loads(captured_request.data.decode("utf-8"))
+        self.assertEqual(payload["options"]["num_ctx"], 4096)
+        self.assertEqual(payload["options"]["num_predict"], 512)
+        self.assertEqual(payload["keep_alive"], 0)
+
+    def test_call_judge_api_ollama_streams_native_chat_chunks(self) -> None:
+        def fake_urlopen(req, timeout):
+            return _FakeResponse(
+                lines=[
+                    {"message": {"content": '{"total": '}, "done": False},
+                    {"message": {"content": "1.0}"}, "done": False},
+                    {"done": True},
+                ]
+            )
+
+        with patch.dict(os.environ, {"OLLAMA_JUDGE_STREAM": "1"}, clear=True), patch(
+            "lib_agent.request.urlopen", side_effect=fake_urlopen
+        ):
+            result = call_judge_api(
+                prompt="grade this",
+                model="ollama/llama3.1",
+            )
+
+        self.assertEqual(result, {"status": "success", "text": '{"total": 1.0}'})
+
+    def test_ollama_base_url_accepts_host_without_v1(self) -> None:
+        with patch.dict(os.environ, {"OLLAMA_BASE_URL": "http://example.test:11434"}, clear=True):
+            endpoint = _ollama_native_chat_endpoint()
+
+        self.assertEqual(endpoint, "http://example.test:11434/api/chat")
+
+    def test_ollama_base_url_accepts_old_chat_completions_endpoint(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"OLLAMA_BASE_URL": "http://example.test:11434/v1/chat/completions"},
+            clear=True,
+        ):
+            endpoint = _ollama_native_chat_endpoint()
+
+        self.assertEqual(endpoint, "http://example.test:11434/api/chat")
 
 
 if __name__ == "__main__":

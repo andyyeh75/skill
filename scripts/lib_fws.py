@@ -13,6 +13,8 @@ import time
 
 logger = logging.getLogger("pinchbench")
 
+FWS_CMD = "fws.cmd" if os.name == "nt" else "fws"
+
 # Environment variables that fws sets
 MOCK_GWS_ENV_KEYS = [
     "GOOGLE_WORKSPACE_CLI_CONFIG_DIR",
@@ -32,7 +34,7 @@ def is_fws_task(frontmatter: dict) -> bool:
 
 def fws_available() -> bool:
     """Check if fws CLI is available."""
-    return shutil.which("fws") is not None
+    return shutil.which(FWS_CMD) is not None
 
 
 def start_fws() -> dict:
@@ -43,12 +45,12 @@ def start_fws() -> dict:
     logger.info("🔧 Starting fws server...")
 
     # Stop any existing server
-    subprocess.run(["fws", "server", "stop"], capture_output=True, check=False)
+    subprocess.run([FWS_CMD, "server", "stop"], capture_output=True, check=False)
     time.sleep(0.3)
 
     # Start server
     result = subprocess.run(
-        ["fws", "server", "start"],
+        [FWS_CMD, "server", "start"],
         capture_output=True,
         text=True,
         timeout=30,
@@ -93,7 +95,7 @@ def stop_fws(original_env: dict) -> None:
     """Stop the fws server and restore original environment variables."""
     logger.info("🔧 Stopping fws server...")
 
-    subprocess.run(["fws", "server", "stop"], capture_output=True, check=False)
+    subprocess.run([FWS_CMD, "server", "stop"], capture_output=True, check=False)
 
     # Restore original env
     for key, value in original_env.items():

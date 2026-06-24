@@ -241,7 +241,7 @@ def _parse_args() -> argparse.Namespace:
             "Judge model or backend. Default (unset): OpenClaw agent session with "
             "openrouter/anthropic/claude-haiku-4.5. Set to a model ID to call its API "
             "directly (e.g. kilo/anthropic/claude-sonnet-4-5, openai/gpt-4o, "
-            "anthropic/claude-sonnet-4-5-20250514, claude)"
+            "anthropic/claude-sonnet-4-5-20250514, ollama/llama3.1, claude)"
         ),
     )
     parser.add_argument(
