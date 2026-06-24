@@ -1334,7 +1334,7 @@ def _judge_via_kilo(prompt: str, model: str, timeout_seconds: float) -> Dict[str
 
 
 def _ollama_native_chat_endpoint() -> str:
-    base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
+    base_url = os.environ.get("OLLAMA_JUDGE_BASE_URL", "http://localhost:11434").rstrip("/")
     if base_url.endswith("/api/chat"):
         return base_url
     if base_url.endswith("/v1/chat/completions"):

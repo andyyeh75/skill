@@ -149,7 +149,7 @@ class OllamaJudgeTests(unittest.TestCase):
             return _FakeResponse({"message": {"content": '{"total": 0.75}'}})
 
         env = {
-            "OLLAMA_BASE_URL": "http://example.test:11434/v1",
+            "OLLAMA_JUDGE_BASE_URL": "http://example.test:11434/v1",
             "OLLAMA_API_KEY": "proxy-key",
             "OLLAMA_JUDGE_NUM_CTX": "4096",
             "OLLAMA_JUDGE_NUM_PREDICT": "512",
@@ -193,21 +193,38 @@ class OllamaJudgeTests(unittest.TestCase):
 
         self.assertEqual(result, {"status": "success", "text": '{"total": 1.0}'})
 
-    def test_ollama_base_url_accepts_host_without_v1(self) -> None:
-        with patch.dict(os.environ, {"OLLAMA_BASE_URL": "http://example.test:11434"}, clear=True):
-            endpoint = _ollama_native_chat_endpoint()
-
-        self.assertEqual(endpoint, "http://example.test:11434/api/chat")
-
-    def test_ollama_base_url_accepts_old_chat_completions_endpoint(self) -> None:
+    def test_ollama_judge_base_url_accepts_host_without_v1(self) -> None:
         with patch.dict(
             os.environ,
-            {"OLLAMA_BASE_URL": "http://example.test:11434/v1/chat/completions"},
+            {"OLLAMA_JUDGE_BASE_URL": "http://example.test:11434"},
             clear=True,
         ):
             endpoint = _ollama_native_chat_endpoint()
 
         self.assertEqual(endpoint, "http://example.test:11434/api/chat")
+
+    def test_ollama_judge_base_url_accepts_old_chat_completions_endpoint(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"OLLAMA_JUDGE_BASE_URL": "http://example.test:11434/v1/chat/completions"},
+            clear=True,
+        ):
+            endpoint = _ollama_native_chat_endpoint()
+
+        self.assertEqual(endpoint, "http://example.test:11434/api/chat")
+
+    def test_ollama_judge_endpoint_ignores_agent_ollama_base_url(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "OLLAMA_BASE_URL": "http://agent.example.test:11434",
+                "OLLAMA_JUDGE_BASE_URL": "http://judge.example.test:11434",
+            },
+            clear=True,
+        ):
+            endpoint = _ollama_native_chat_endpoint()
+
+        self.assertEqual(endpoint, "http://judge.example.test:11434/api/chat")
 
 
 if __name__ == "__main__":

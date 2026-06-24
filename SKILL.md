@@ -22,6 +22,12 @@ PinchBench measures how well LLM models perform as the brain of an OpenClaw agen
 
 ## Quick Start
 
+On Windows, run the environment setup script in the same PowerShell session before starting a remote Ollama judge run. It sets UTF-8 console/Python behavior and points only the judge to the known remote Ollama host:
+
+```powershell
+.\setup-ollama-judge-env.ps1
+```
+
 ```bash
 cd <skill_directory>
 
@@ -49,10 +55,10 @@ ollama pull qwen3-coder:30B
 ollama serve
 ```
 
-2. On the benchmark machine, point PinchBench at the remote Ollama base URL. Use the host root URL, `/v1`, `/api/chat`, or `/v1/chat/completions`; the benchmark normalizes these to the native `/api/chat` endpoint.
+2. On the benchmark machine, point PinchBench's judge at the remote Ollama base URL. Use the host root URL, `/v1`, `/api/chat`, or `/v1/chat/completions`; the benchmark normalizes these to the native `/api/chat` endpoint.
 
 ```bash
-export OLLAMA_BASE_URL=http://<ollama-host>:11434
+export OLLAMA_JUDGE_BASE_URL=http://<ollama-judge-host>:11434
 export OLLAMA_JUDGE_NUM_CTX=4096
 export OLLAMA_JUDGE_NUM_PREDICT=2048
 export OLLAMA_JUDGE_KEEP_ALIVE=0
@@ -61,7 +67,7 @@ export OLLAMA_JUDGE_KEEP_ALIVE=0
 PowerShell equivalent:
 
 ```powershell
-$env:OLLAMA_BASE_URL = "http://<ollama-host>:11434"
+$env:OLLAMA_JUDGE_BASE_URL = "http://<ollama-judge-host>:11434"
 $env:OLLAMA_JUDGE_NUM_CTX = "4096"
 $env:OLLAMA_JUDGE_NUM_PREDICT = "2048"
 $env:OLLAMA_JUDGE_KEEP_ALIVE = "0"
@@ -112,7 +118,7 @@ On Windows with the checked-in virtual environment, the command shape is:
 
 | Variable | Use |
 | --- | --- |
-| `OLLAMA_BASE_URL` | Remote or local Ollama base URL. Defaults to `http://localhost:11434`. |
+| `OLLAMA_JUDGE_BASE_URL` | Remote or local Ollama judge base URL. Defaults to `http://localhost:11434`. |
 | `OLLAMA_API_KEY` | Optional bearer token for an authenticated Ollama proxy. |
 | `OLLAMA_JUDGE_NUM_CTX` | Sets native `options.num_ctx`; lower it if the judge host runs out of KV cache memory. |
 | `OLLAMA_JUDGE_NUM_PREDICT` | Sets native `options.num_predict`; default is `2048`. |
@@ -121,6 +127,7 @@ On Windows with the checked-in virtual environment, the command shape is:
 
 Operational notes:
 
+- `OLLAMA_JUDGE_BASE_URL` is for direct judge calls only. Keep `OLLAMA_BASE_URL` available for an Ollama-backed agent model or other OpenClaw/runtime configuration.
 - Prefer `--no-parallel-judge` for remote Ollama unless the judge host has enough memory for concurrent model work.
 - Keep `--no-upload` on while comparing private/local judge behavior.
 - Use a date-stamped `--output-dir` so result JSON, transcripts, and logs stay grouped.
