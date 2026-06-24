@@ -13,7 +13,7 @@ SCRIPTS_DIR = ROOT / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from lib_agent import _archive_transcript  # noqa: E402
+from lib_agent import _archive_transcript, _restore_bootstrap_files, _snapshot_bootstrap_files  # noqa: E402
 from lib_tasks import Task  # noqa: E402
 
 
@@ -191,6 +191,36 @@ class TestArchiveTranscript(unittest.TestCase):
                 task_id="task_test",
                 session_index=0,
             )
+
+
+class TestBootstrapFileProtection(unittest.TestCase):
+    """Test protection for OpenClaw bootstrap files across benchmark tasks."""
+
+    def test_restore_bootstrap_file_deleted_by_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            bootstrap = workspace / "BOOTSTRAP.md"
+            bootstrap.write_text("original bootstrap", encoding="utf-8")
+
+            snapshot = _snapshot_bootstrap_files(workspace)
+            bootstrap.unlink()
+
+            _restore_bootstrap_files(workspace, snapshot)
+
+            self.assertEqual(bootstrap.read_text(encoding="utf-8"), "original bootstrap")
+
+    def test_restore_bootstrap_file_modified_by_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            bootstrap = workspace / "BOOTSTRAP.md"
+            bootstrap.write_text("original bootstrap", encoding="utf-8")
+
+            snapshot = _snapshot_bootstrap_files(workspace)
+            bootstrap.write_text("modified bootstrap", encoding="utf-8")
+
+            _restore_bootstrap_files(workspace, snapshot)
+
+            self.assertEqual(bootstrap.read_text(encoding="utf-8"), "original bootstrap")
 
 
 class TestMultiSessionTaskLoading(unittest.TestCase):

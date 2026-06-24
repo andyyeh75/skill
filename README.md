@@ -125,11 +125,22 @@ By default (no `--judge` flag), the LLM judge runs as an OpenClaw agent session.
 # Direct API via OpenAI
 ./scripts/run.sh --model openai/gpt-4o --judge openai/gpt-4o
 
+# Local or remote Ollama native endpoint
+./scripts/run.sh --model openai/gpt-4o --judge ollama/llama3.1
+
 # Headless Claude CLI
 ./scripts/run.sh --model openai/gpt-4o --judge claude
 ```
 
-Required env vars: `OPENROUTER_API_KEY`, `KILO_API_KEY`, `ANTHROPIC_API_KEY`, or `OPENAI_API_KEY` depending on the judge model prefix.
+Required env vars: `OPENROUTER_API_KEY`, `KILO_API_KEY`, `ANTHROPIC_API_KEY`, or `OPENAI_API_KEY` depending on the judge model prefix. For Ollama, `OLLAMA_BASE_URL` defaults to `http://localhost:11434`; set it only if your Ollama endpoint is elsewhere. Ollama judges use the native `/api/chat` endpoint and support these optional tuning variables:
+
+| Variable                    | Description                                                                 |
+| --------------------------- | --------------------------------------------------------------------------- |
+| `OLLAMA_JUDGE_NUM_CTX`      | Sets `options.num_ctx` for judge requests; lower values reduce KV cache RAM. |
+| `OLLAMA_JUDGE_NUM_PREDICT`  | Sets `options.num_predict` for judge output length; default is `2048`.       |
+| `OLLAMA_JUDGE_KEEP_ALIVE`   | Sets `keep_alive`; use `0` to unload after each judge request.               |
+| `OLLAMA_JUDGE_STREAM`       | Set to `1` to use streamed native chat responses.                            |
+| `OLLAMA_API_KEY`            | Optional bearer token for an authenticated Ollama proxy.                     |
 
 ## Contributing Tasks
 

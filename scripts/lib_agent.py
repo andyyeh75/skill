@@ -35,6 +35,14 @@ JUDGE_MAX_MSG_CHARS = int(os.environ.get("PINCHBENCH_JUDGE_MAX_MSG_CHARS", "3000
 
 # Valid thinking levels for OpenClaw reasoning depth
 VALID_THINKING_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh", "adaptive")
+OPENCLAW_BOOTSTRAP_FILES = (
+    "SOUL.md",
+    "BOOTSTRAP.md",
+    "USER.md",
+    "IDENTITY.md",
+    "HEARTBEAT.md",
+    "TOOLS.md",
+)
 
 
 def _coerce_subprocess_output(value: Any) -> str:
@@ -404,6 +412,40 @@ def cleanup_agent_sessions(agent_id: str) -> None:
         logger.info("Removed %s old OpenClaw session transcripts for %s", removed, agent_id)
 
 
+def _snapshot_bootstrap_files(workspace: Path) -> dict[str, bytes]:
+    """Capture OpenClaw bootstrap files so task output cannot poison later runs."""
+    snapshot: dict[str, bytes] = {}
+    if not workspace.exists():
+        return snapshot
+    for fname in OPENCLAW_BOOTSTRAP_FILES:
+        fpath = workspace / fname
+        if fpath.exists():
+            try:
+                snapshot[fname] = fpath.read_bytes()
+            except OSError as exc:
+                logger.warning("Failed to snapshot bootstrap file %s: %s", fpath, exc)
+    return snapshot
+
+
+def _restore_bootstrap_files(workspace: Path, snapshot: dict[str, bytes]) -> None:
+    """Restore OpenClaw bootstrap files deleted or modified by a benchmark task."""
+    if not snapshot:
+        return
+    restored: list[str] = []
+    workspace.mkdir(parents=True, exist_ok=True)
+    for fname, content in snapshot.items():
+        fpath = workspace / fname
+        try:
+            current = fpath.read_bytes() if fpath.exists() else None
+            if current != content:
+                fpath.write_bytes(content)
+                restored.append(fname)
+        except OSError as exc:
+            logger.warning("Failed to restore bootstrap file %s: %s", fpath, exc)
+    if restored:
+        logger.info("Restored OpenClaw bootstrap files: %s", ", ".join(restored))
+
+
 def prepare_task_workspace(skill_dir: Path, run_id: str, task: Task, agent_id: str) -> Path:
     """
     Prepare workspace for a task by copying fixtures.
@@ -418,8 +460,6 @@ def prepare_task_workspace(skill_dir: Path, run_id: str, task: Task, agent_id: s
         logger.warning("Could not find agent workspace, using fallback")
         workspace = Path(f"/tmp/pinchbench/{run_id}/{task.task_id}")
 
-    _BOOTSTRAP_FILES = ["SOUL.md", "BOOTSTRAP.md", "USER.md", "IDENTITY.md", "HEARTBEAT.md", "TOOLS.md"]
-
     def _remove_readonly(func, path, _):
         try:
             os.chmod(path, stat.S_IWRITE)
@@ -429,7 +469,7 @@ def prepare_task_workspace(skill_dir: Path, run_id: str, task: Task, agent_id: s
 
     saved_bootstrap: dict[str, bytes] = {}
     if workspace.exists():
-        for fname in _BOOTSTRAP_FILES:
+        for fname in OPENCLAW_BOOTSTRAP_FILES:
             fpath = workspace / fname
             if fpath.exists():
                 saved_bootstrap[fname] = fpath.read_bytes()
@@ -804,6 +844,7 @@ def execute_openclaw_task(
 
     start_time = time.time()
     workspace = prepare_task_workspace(skill_dir, run_id, task, agent_id)
+    protected_bootstrap = _snapshot_bootstrap_files(workspace)
     session_id = f"{task.task_id}_{int(time.time() * 1000)}"
     timeout_seconds = task.timeout_seconds * timeout_multiplier
     stdout = ""
@@ -879,6 +920,7 @@ def execute_openclaw_task(
                     check=False,
                     shell=USE_SHELL,
                 )
+                _restore_bootstrap_files(workspace, protected_bootstrap)
                 stdout += result.stdout
                 stderr += result.stderr
                 exit_code = result.returncode
@@ -888,9 +930,11 @@ def execute_openclaw_task(
                 timed_out = True
                 stdout += _coerce_subprocess_output(exc.stdout)
                 stderr += _coerce_subprocess_output(exc.stderr)
+                _restore_bootstrap_files(workspace, protected_bootstrap)
                 break
             except FileNotFoundError as exc:
                 stderr = f"openclaw command not found: {exc}"
+                _restore_bootstrap_files(workspace, protected_bootstrap)
                 break
     else:
         # Single-session task: send task.prompt once
@@ -918,6 +962,7 @@ def execute_openclaw_task(
                 check=False,
                 shell=USE_SHELL,
             )
+            _restore_bootstrap_files(workspace, protected_bootstrap)
             stdout = result.stdout
             stderr = result.stderr
             exit_code = result.returncode
@@ -925,8 +970,10 @@ def execute_openclaw_task(
             timed_out = True
             stdout = _coerce_subprocess_output(exc.stdout)
             stderr = _coerce_subprocess_output(exc.stderr)
+            _restore_bootstrap_files(workspace, protected_bootstrap)
         except FileNotFoundError as exc:
             stderr = f"openclaw command not found: {exc}"
+            _restore_bootstrap_files(workspace, protected_bootstrap)
 
     # For multi-session tasks that used new_session, the final transcript only
     # contains the last session's conversation.  Merge archived session
@@ -1186,6 +1233,7 @@ def call_judge_api(
     Dispatches based on model prefix:
       - openrouter/* -> OpenRouter chat completions API
       - kilo/*       -> Kilo Gateway chat completions API
+      - ollama/*     -> Ollama native chat API
       - anthropic/*  -> Anthropic Messages API
       - openai/*     -> OpenAI chat completions API
       - claude       -> headless Claude CLI (claude -p)
@@ -1196,6 +1244,8 @@ def call_judge_api(
         return _judge_via_claude_cli(prompt, model, timeout_seconds)
     if model.startswith("kilo/"):
         return _judge_via_kilo(prompt, model, timeout_seconds)
+    if model.startswith("ollama/"):
+        return _judge_via_ollama(prompt, model, timeout_seconds)
     if model.startswith("anthropic/"):
         return _judge_via_anthropic(prompt, model, timeout_seconds)
     if model.startswith("openai/"):
@@ -1208,25 +1258,26 @@ def _judge_via_openai_compat(
     prompt: str,
     api_model: str,
     endpoint: str,
-    api_key: str,
+    api_key: str | None,
     timeout_seconds: float,
     extra_headers: Optional[Dict[str, str]] = None,
+    max_tokens_field: str = "max_completion_tokens",
 ) -> Dict[str, Any]:
     """Shared implementation for OpenAI-compatible chat completions APIs."""
-    payload = json.dumps({
+    payload_data: Dict[str, Any] = {
         "model": api_model,
         "messages": [
             {"role": "system", "content": _JUDGE_SYSTEM_MSG},
             {"role": "user", "content": prompt},
         ],
         "temperature": 0.0,
-        "max_completion_tokens": 2048,
-    }).encode("utf-8")
-
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
+        max_tokens_field: 2048,
     }
+    payload = json.dumps(payload_data).encode("utf-8")
+
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     if extra_headers:
         headers.update(extra_headers)
 
@@ -1280,6 +1331,133 @@ def _judge_via_kilo(prompt: str, model: str, timeout_seconds: float) -> Dict[str
         api_key,
         timeout_seconds,
     )
+
+
+def _ollama_chat_completions_endpoint() -> str:
+    base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1").rstrip("/")
+    if base_url.endswith("/chat/completions"):
+        return base_url
+    if not base_url.endswith("/v1"):
+        base_url = f"{base_url}/v1"
+    return f"{base_url}/chat/completions"
+
+
+def _ollama_native_chat_endpoint() -> str:
+    base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
+    if base_url.endswith("/api/chat"):
+        return base_url
+    if base_url.endswith("/v1/chat/completions"):
+        base_url = base_url.removesuffix("/v1/chat/completions")
+    elif base_url.endswith("/chat/completions"):
+        base_url = base_url.removesuffix("/chat/completions")
+    if base_url.endswith("/v1"):
+        base_url = base_url.removesuffix("/v1")
+    return f"{base_url}/api/chat"
+
+
+def _env_int(name: str, default: int | None = None) -> int | None:
+    value = os.environ.get(name)
+    if value is None or value.strip() == "":
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        logger.warning("Ignoring invalid integer for %s: %r", name, value)
+        return default
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _ollama_keep_alive_value() -> str | int | None:
+    value = os.environ.get("OLLAMA_JUDGE_KEEP_ALIVE")
+    if value is None or value.strip() == "":
+        return None
+    stripped = value.strip()
+    try:
+        return int(stripped)
+    except ValueError:
+        return stripped
+
+
+def _judge_via_ollama(prompt: str, model: str, timeout_seconds: float) -> Dict[str, Any]:
+    bare_model = model.removeprefix("ollama/")
+    options: Dict[str, Any] = {
+        "temperature": 0.0,
+        "num_predict": _env_int("OLLAMA_JUDGE_NUM_PREDICT", 2048),
+    }
+    num_ctx = _env_int("OLLAMA_JUDGE_NUM_CTX")
+    if num_ctx is not None:
+        options["num_ctx"] = num_ctx
+
+    stream = _env_bool("OLLAMA_JUDGE_STREAM", False)
+    payload_data: Dict[str, Any] = {
+        "model": bare_model,
+        "messages": [
+            {"role": "system", "content": _JUDGE_SYSTEM_MSG},
+            {"role": "user", "content": prompt},
+        ],
+        "format": "json",
+        "stream": stream,
+        "options": options,
+    }
+    keep_alive = _ollama_keep_alive_value()
+    if keep_alive is not None:
+        payload_data["keep_alive"] = keep_alive
+
+    payload = json.dumps(payload_data).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    api_key = os.environ.get("OLLAMA_API_KEY")
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    req = request.Request(
+        _ollama_native_chat_endpoint(),
+        data=payload,
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with request.urlopen(req, timeout=timeout_seconds) as resp:
+            if stream:
+                chunks: List[str] = []
+                for raw_line in resp:
+                    line = raw_line.strip()
+                    if not line:
+                        continue
+                    item = json.loads(line.decode("utf-8"))
+                    if item.get("error"):
+                        return {"status": "error", "text": "", "error": str(item["error"])}
+                    chunks.append(item.get("message", {}).get("content", ""))
+                data = {"message": {"content": "".join(chunks)}}
+            else:
+                data = json.loads(resp.read().decode("utf-8"))
+    except error.HTTPError as exc:
+        body = ""
+        try:
+            body = exc.read().decode("utf-8", errors="replace")[:500]
+        except Exception:
+            pass
+        logger.error("Ollama judge API error (%s): %s", exc.code, body)
+        return {"status": "error", "text": "", "error": f"HTTP {exc.code}: {body}"}
+    except error.URLError as exc:
+        logger.error("Ollama judge network error: %s", exc)
+        return {"status": "error", "text": "", "error": str(exc)}
+    except TimeoutError:
+        return {"status": "timeout", "text": "", "error": "Request timed out"}
+    except json.JSONDecodeError as exc:
+        return {"status": "error", "text": "", "error": f"Invalid Ollama JSON response: {exc}"}
+
+    if data.get("error"):
+        return {"status": "error", "text": "", "error": str(data["error"])}
+    text = data.get("message", {}).get("content", "")
+    if not text:
+        return {"status": "error", "text": "", "error": "No message content in response"}
+    return {"status": "success", "text": text}
 
 
 def _judge_via_openai(prompt: str, model: str, timeout_seconds: float) -> Dict[str, Any]:
