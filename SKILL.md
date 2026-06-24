@@ -40,7 +40,7 @@ uv run scripts/benchmark.py --model openrouter/anthropic/claude-sonnet-4 --no-up
 
 ## Best Known Method: Remote Ollama Judge
 
-Use `--judge ollama/<model>` when the benchmark subject model should still run through OpenClaw, but LLM grading should go directly to an Ollama server. This bypasses OpenClaw personality/session behavior for grading and asks Ollama's native `/api/chat` endpoint for strict JSON.
+Use `--judge ollama/<model>` when the benchmark subject model should still run through OpenClaw, but LLM grading should go directly to an Ollama server. This can ask Ollama's native `/api/chat` endpoint for strict JSON.
 
 1. On the Ollama host, pull the judge model and make sure the server is reachable from the benchmark machine:
 
@@ -174,6 +174,36 @@ jq '.tasks[] | select(.grading.mean < 0.5)' results/*.json
 # Calculate overall score
 jq '{average: ([.tasks[].grading.mean] | add / length)}' results/*.json
 ```
+
+
+## Partial Tasks (23)
+
+| Task | Category | Description |
+|------|----------|-------------|
+| `task_sanity` | Basic | Verify agent works |
+| `task_calendar` | Productivity | Calendar event creation |
+| `task_stock` | Research | Stock price lookup |
+| `task_blog` | Writing | Blog post creation |
+| `task_weather` | Coding | Weather script |
+| `task_summary` | Analysis | Document summarization |
+| `task_events` | Research | Conference research |
+| `task_email` | Writing | Email drafting |
+| `task_memory` | Memory | Context retrieval |
+| `task_files` | Files | File structure creation |
+| `task_workflow` | Integration | Multi-step API workflow |
+| `task_clawdhub` | Skills | ClawHub interaction |
+| `task_skill_search` | Skills | Skill discovery |
+| `task_image_gen` | Creative | Image generation |
+| `task_humanizer` | Writing | Text humanization |
+| `task_daily_summary` | Productivity | Daily digest |
+| `task_email_triage` | Email | Inbox triage |
+| `task_email_search` | Email | Email search |
+| `task_market_research` | Research | Market analysis |
+| `task_spreadsheet_summary` | Analysis | Spreadsheet analysis |
+| `task_eli5_pdf_summary` | Analysis | PDF simplification |
+| `task_openclaw_comprehension` | Knowledge | OpenClaw docs comprehension |
+| `task_second_brain` | Memory | Knowledge management |
+
 
 ## Adding Custom Tasks
 
