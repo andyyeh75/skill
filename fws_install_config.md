@@ -55,10 +55,14 @@ gh issue list -R testuser/my-project
 gh pr list -R testuser/my-project
 ```
 
-8. Run OpenClaw or PinchBench from that same shell.
-For PinchBench, this is enough:
+8. Run OpenClaw or PinchBench from that same shell. Select the integration tasks explicitly so the command does not depend on a run-specific helper:
 ```bash
-python3 /opt/docker-amd/skill/scripts/rerun_low_score_hybrid.py
+MODEL="<model-id>"
+SUITE="task_gh_issue_triage,task_gws_email_triage,task_gws_cross_service,task_gws_task_management"
+./scripts/run.sh \
+  --model "$MODEL" \
+  --suite "$SUITE" \
+  --no-upload
 ```
 
 9. If you use raw OpenClaw CLI manually, prefer local mode so env propagates:
@@ -82,10 +86,15 @@ Use this in the shell where you want to run OpenClaw or PinchBench:
 source /opt/docker-amd/skill/scripts/setup_mock_benchmark_env.sh
 ```
 
-Then rerun the four tasks with:
+Then rerun the four tasks from the repository root with:
 
 ```bash
-python3 /opt/docker-amd/skill/scripts/rerun_low_score_hybrid.py
+MODEL="<model-id>"
+SUITE="task_gh_issue_triage,task_gws_email_triage,task_gws_cross_service,task_gws_task_management"
+./scripts/run.sh \
+  --model "$MODEL" \
+  --suite "$SUITE" \
+  --no-upload
 ```
 
 I did not start the rerun yet, so the environment is ready without consuming another benchmark run.
@@ -160,4 +169,3 @@ export GH_TOKEN=your_token_here
 gh auth status
 gh repo view owner/repo
 ```
-

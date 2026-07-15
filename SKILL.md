@@ -167,15 +167,19 @@ Supported direct judge prefixes:
 | `--register` | Request new API token for submissions. |
 | `--upload FILE` | Upload previous results JSON. |
 
-### Local Lemonade Run Default
+### Local Lemonade Timeout Guidance
 
-For runs with `lemonade`, always include:
+Use bounded task timeouts for normal Lemonade smoke tests and scored comparisons. For a
+deliberate artifact-collection run where slow local tasks must finish, add:
 
 ```bash
 --timeout-multiplier 1000
 ```
 
-This is a multiplier, not a seconds value. It is intentionally used here as an effectively unlimited task-timeout setting so slow local Lemonade/OpenClaw runs can finish and write final artifacts.
+This is a multiplier, not a seconds value. A value of `1000` is effectively unlimited and can
+allow runaway tasks to consume excessive time and tokens, so record it with the run and use it
+only for diagnostic or artifact-preservation workflows. See
+`PINCHBENCH_LEMONADE_QWEN3_6_35B_GUIDE.md` for bounded smoke, scored, and full-run profiles.
 
 ## Results
 
