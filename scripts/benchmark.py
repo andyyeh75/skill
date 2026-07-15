@@ -496,6 +496,7 @@ def _compute_efficiency_summary(
         task_id = entry["task_id"]
         grading = grades_by_task_id.get(task_id, {})
         score = float(grading.get("mean", 0.0))
+        has_score = _grading_max_score(grading) > 0
 
         inp = int(usage.get("input_tokens", 0))
         out = int(usage.get("output_tokens", 0))
@@ -517,17 +518,16 @@ def _compute_efficiency_summary(
         per_task_efficiency.append(
             {
                 "task_id": task_id,
-                "score": round(score, 4),
+                "score": round(score, 4) if has_score else None,
                 "total_tokens": tot,
                 "cost_usd": round(cost, 6),
                 "tokens_per_score_point": round(tot / score, 1) if score > 0 else None,
             }
         )
 
-    # Aggregate scores
-    all_scores = [float(g.get("mean", 0.0)) for g in grades_by_task_id.values()]
-    total_score = sum(all_scores)
-    num_tasks = len(all_scores)
+    # Aggregate only actual scores. Skipped/no-judge tasks have max_score=0.
+    total_score, total_max_score = _compute_score_totals(grades_by_task_id)
+    num_tasks = len(grades_by_task_id)
 
     summary: Dict[str, Any] = {
         "total_tokens": total_tokens,
@@ -540,10 +540,14 @@ def _compute_efficiency_summary(
         "tokens_per_task": round(total_tokens / num_tasks, 1) if num_tasks > 0 else 0,
         "cost_per_task_usd": round(total_cost_usd / num_tasks, 6) if num_tasks > 0 else 0,
         "score_per_1k_tokens": (
-            round(total_score / (total_tokens / 1000), 6) if total_tokens > 0 else None
+            round(total_score / (total_tokens / 1000), 6)
+            if total_tokens > 0 and total_max_score > 0
+            else None
         ),
         "score_per_dollar": (
-            round(total_score / total_cost_usd, 4) if total_cost_usd > 0 else None
+            round(total_score / total_cost_usd, 4)
+            if total_cost_usd > 0 and total_max_score > 0
+            else None
         ),
         "per_task": per_task_efficiency,
     }
@@ -555,7 +559,11 @@ def _log_efficiency_summary(
     grades_by_task_id: Dict[str, Dict[str, Any]],
 ) -> None:
     """Log a human-readable token efficiency summary."""
-    all_scores = [float(g.get("mean", 0.0)) for g in grades_by_task_id.values()]
+    all_scores = [
+        float(g.get("mean", 0.0))
+        for g in grades_by_task_id.values()
+        if _grading_max_score(g) > 0
+    ]
     mean_score = statistics.mean(all_scores) if all_scores else 0.0
 
     logger.info("\n%s", "=" * 80)
@@ -574,7 +582,10 @@ def _log_efficiency_summary(
         "   Avg tokens/task: %s",
         f"{efficiency['tokens_per_task']:,.0f}",
     )
-    logger.info("   Mean score: %.4f", mean_score)
+    if all_scores:
+        logger.info("   Mean score: %.4f", mean_score)
+    else:
+        logger.info("   Mean score: ungraded")
     if efficiency.get("score_per_1k_tokens") is not None:
         logger.info(
             "   Score per 1K tokens: %.4f (higher = more efficient)",
@@ -586,6 +597,38 @@ def _log_efficiency_summary(
             efficiency["score_per_dollar"],
         )
     logger.info("%s", "=" * 80)
+
+
+def _grading_max_score(grading: Dict[str, Any]) -> float:
+    """Return a task grading summary's maximum score, or zero when skipped."""
+    if "max_score" in grading:
+        return float(grading.get("max_score", 0.0))
+    runs = grading.get("runs", [])
+    if not isinstance(runs, list):
+        return 0.0
+    return max(
+        (
+            float(run.get("max_score", 0.0))
+            for run in runs
+            if isinstance(run, dict)
+        ),
+        default=0.0,
+    )
+
+
+def _compute_score_totals(
+    grades_by_task_id: Dict[str, Dict[str, Any]],
+) -> tuple[float, float]:
+    """Return earned and possible points, excluding skipped grades."""
+    total_score = 0.0
+    total_max_score = 0.0
+    for grading in grades_by_task_id.values():
+        max_score = _grading_max_score(grading)
+        if max_score <= 0:
+            continue
+        total_score += float(grading.get("mean", 0.0))
+        total_max_score += max_score
+    return total_score, total_max_score
 
 
 def _compute_category_scores(
@@ -612,8 +655,10 @@ def _compute_category_scores(
 
         category = task.category.upper() if task.category else "UNCATEGORIZED"
         grading = entry.get("grading", {})
+        max_score = _grading_max_score(grading)
+        if max_score <= 0:
+            continue
         mean_score = float(grading.get("mean", 0.0))
-        max_score = 1.0  # Each task is scored 0-1
 
         if category not in raw:
             raw[category] = {"score": 0.0, "max_score": 0.0, "task_count": 0}
@@ -665,7 +710,15 @@ def _log_category_summary(
     logger.info("🦀 PINCHBENCH SCORE SUMMARY")
     logger.info("%s", "=" * 80)
     logger.info("")
-    logger.info("   Overall Score: %.1f%% (%.1f / %.1f)", overall_pct, total_earned, total_possible)
+    if total_possible > 0:
+        logger.info(
+            "   Overall Score: %.1f%% (%.1f / %.1f)",
+            overall_pct,
+            total_earned,
+            total_possible,
+        )
+    else:
+        logger.info("   Overall Score: ungraded")
     logger.info("")
     logger.info("   %-20s %8s %12s", "CATEGORY", "SCORE", "TASKS")
     logger.info("   %s", "-" * 44)
@@ -1123,7 +1176,13 @@ def main():
                 # Log score immediately after grading
                 score_pct = grade.score / grade.max_score * 100 if grade.max_score > 0 else 0
                 status_emoji = (
-                    "✅" if grade.score >= grade.max_score else "⚠️" if grade.score > 0 else "❌"
+                    "⏭️"
+                    if grade.max_score <= 0
+                    else "✅"
+                    if grade.score >= grade.max_score
+                    else "⚠️"
+                    if grade.score > 0
+                    else "❌"
                 )
                 logger.info(
                     "%s Task %s: %.1f/%.1f (%.0f%%) - %s",
@@ -1191,6 +1250,7 @@ def main():
         if (
             task.task_id == sanity_task_id
             and grades_by_task_id[task.task_id]["mean"] == 0.0
+            and not args.no_judge
             and not args.no_fail_fast
             and not all_runs_missing_transcript
         ):
@@ -1200,7 +1260,11 @@ def main():
             )
             axiom.sanity_failed(score=grades_by_task_id[task.task_id]["mean"])
             sys.exit(3)
-        if task.task_id == sanity_task_id and grades_by_task_id[task.task_id]["mean"] == 0.0:
+        if (
+            task.task_id == sanity_task_id
+            and grades_by_task_id[task.task_id]["mean"] == 0.0
+            and not args.no_judge
+        ):
             if all_runs_missing_transcript:
                 logger.warning(
                     "⚠️ Sanity check scored 0%% but transcripts were missing for all runs; skipping fail-fast as likely infrastructure/logging issue."
@@ -1244,10 +1308,12 @@ def main():
     task_entries, efficiency = _build_and_write_results()
 
     # Calculate and log final score summary
-    total_score = sum(grades_by_task_id[tid]["mean"] for tid in grades_by_task_id)
-    max_score = float(len(grades_by_task_id))  # Each task has max_score of 1.0
+    total_score, max_score = _compute_score_totals(grades_by_task_id)
     score_pct = (total_score / max_score * 100) if max_score > 0 else 0
-    logger.info("📊 Final score: %.2f/%.0f (%.1f%%)", total_score, max_score, score_pct)
+    if max_score > 0:
+        logger.info("📊 Final score: %.2f/%.0f (%.1f%%)", total_score, max_score, score_pct)
+    else:
+        logger.info("📊 Final score: ungraded (no judge scores)")
 
     # Log judge cache stats
     if not args.no_judge_cache:
@@ -1266,7 +1332,7 @@ def main():
     _log_category_summary(task_entries, tasks_by_id, category_order)
     _log_efficiency_summary(efficiency, grades_by_task_id)
     # Run trend analysis if requested
-    if args.trend:
+    if args.trend and not args.no_judge:
         try:
             from lib_trend import RunTrendAnalyzer
 
@@ -1282,8 +1348,9 @@ def main():
     submission_id = None
     leaderboard_url = None
 
-    if args.no_upload:
-        logger.info("Skipping upload (--no-upload)")
+    if args.no_upload or args.no_judge:
+        reason = "--no-judge" if args.no_judge else "--no-upload"
+        logger.info("Skipping upload (%s)", reason)
     else:
         try:
             from lib_upload import UploadError, upload_results
