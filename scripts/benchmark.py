@@ -241,7 +241,8 @@ def _parse_args() -> argparse.Namespace:
             "Judge model or backend. Default (unset): OpenClaw agent session with "
             "openrouter/anthropic/claude-haiku-4.5. Set to a model ID to call its API "
             "directly (e.g. kilo/anthropic/claude-sonnet-4-5, openai/gpt-4o, "
-            "anthropic/claude-sonnet-4-5-20250514, ollama/llama3.1, claude)"
+            "anthropic/claude-sonnet-4-5-20250514, ollama/llama3.1, "
+            "lemonade/Qwen3-Coder-30B-A3B-Instruct-GGUF, claude)"
         ),
     )
     parser.add_argument(
@@ -275,6 +276,11 @@ def _parse_args() -> argparse.Namespace:
         "--no-parallel-judge",
         action="store_true",
         help="Disable parallel judge execution (grade synchronously after each task)",
+    )
+    parser.add_argument(
+        "--no-judge",
+        action="store_true",
+        help="Run tasks without grading; no judge model or judge API is called",
     )
     parser.add_argument(
         "--no-judge-cache",
@@ -904,7 +910,7 @@ def main():
             pass
 
     # Parallel judge execution: grade previous task while current task runs
-    use_parallel_judge = not args.no_parallel_judge
+    use_parallel_judge = not args.no_parallel_judge and not args.no_judge
     judge_executor: Optional[ThreadPoolExecutor] = None
     pending_grade_future: Optional[Future] = None
     pending_grade_task: Optional[Task] = None
@@ -1086,22 +1092,32 @@ def main():
                 continue
             else:
                 # Synchronous grading
-                try:
-                    grade = grade_task(**grade_kwargs)
-                except Exception as exc:
-                    if execution_error:
-                        note = f"Execution failed: {execution_error}; Grading failed: {exc}"
-                    else:
-                        note = f"Grading failed: {exc}"
-                    logger.warning("Task grading failed for %s, continuing: %s", task.task_id, exc)
+                if args.no_judge:
                     grade = GradeResult(
                         task_id=task.task_id,
                         score=0.0,
-                        max_score=1.0,
-                        grading_type=task.grading_type,
+                        max_score=0.0,
+                        grading_type="skipped",
                         breakdown={},
-                        notes=note,
+                        notes="Grading skipped because --no-judge was set",
                     )
+                else:
+                    try:
+                        grade = grade_task(**grade_kwargs)
+                    except Exception as exc:
+                        if execution_error:
+                            note = f"Execution failed: {execution_error}; Grading failed: {exc}"
+                        else:
+                            note = f"Grading failed: {exc}"
+                        logger.warning("Task grading failed for %s, continuing: %s", task.task_id, exc)
+                        grade = GradeResult(
+                            task_id=task.task_id,
+                            score=0.0,
+                            max_score=1.0,
+                            grading_type=task.grading_type,
+                            breakdown={},
+                            notes=note,
+                        )
                 task_grades.append(grade)
 
                 # Log score immediately after grading

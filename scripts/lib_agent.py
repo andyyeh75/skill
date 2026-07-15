@@ -1234,6 +1234,7 @@ def call_judge_api(
       - openrouter/* -> OpenRouter chat completions API
       - kilo/*       -> Kilo Gateway chat completions API
       - ollama/*     -> Ollama native chat API
+      - lemonade/*   -> Lemonade OpenAI-compatible chat completions API
       - anthropic/*  -> Anthropic Messages API
       - openai/*     -> OpenAI chat completions API
       - claude       -> headless Claude CLI (claude -p)
@@ -1246,6 +1247,8 @@ def call_judge_api(
         return _judge_via_kilo(prompt, model, timeout_seconds)
     if model.startswith("ollama/"):
         return _judge_via_ollama(prompt, model, timeout_seconds)
+    if model.startswith("lemonade/"):
+        return _judge_via_lemonade(prompt, model, timeout_seconds)
     if model.startswith("anthropic/"):
         return _judge_via_anthropic(prompt, model, timeout_seconds)
     if model.startswith("openai/"):
@@ -1329,6 +1332,25 @@ def _judge_via_kilo(prompt: str, model: str, timeout_seconds: float) -> Dict[str
         bare_model,
         "https://api.kilo.ai/api/gateway/chat/completions",
         api_key,
+        timeout_seconds,
+    )
+
+
+def _openai_compat_chat_endpoint(base_url: str) -> str:
+    base_url = base_url.rstrip("/")
+    if base_url.endswith("/chat/completions"):
+        return base_url
+    return f"{base_url}/chat/completions"
+
+
+def _judge_via_lemonade(prompt: str, model: str, timeout_seconds: float) -> Dict[str, Any]:
+    bare_model = model.removeprefix("lemonade/")
+    base_url = os.environ.get("LEMONADE_JUDGE_BASE_URL", "http://127.0.0.1:13305/api/v1")
+    return _judge_via_openai_compat(
+        prompt,
+        bare_model,
+        _openai_compat_chat_endpoint(base_url),
+        os.environ.get("LEMONADE_API_KEY"),
         timeout_seconds,
     )
 

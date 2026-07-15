@@ -167,6 +167,16 @@ Supported direct judge prefixes:
 | `--register` | Request new API token for submissions. |
 | `--upload FILE` | Upload previous results JSON. |
 
+### Local Lemonade Run Default
+
+For runs with `lemonade`, always include:
+
+```bash
+--timeout-multiplier 1000
+```
+
+This is a multiplier, not a seconds value. It is intentionally used here as an effectively unlimited task-timeout setting so slow local Lemonade/OpenClaw runs can finish and write final artifacts.
+
 ## Results
 
 Results are saved as JSON in the output directory. Session transcripts are saved next to the result file in `{run_id}_transcripts/`.
@@ -183,7 +193,7 @@ jq '{average: ([.tasks[].grading.mean] | add / length)}' results/*.json
 ```
 
 
-## Partial Tasks (23)
+## Partial Tasks for automated grading (23)
 
 | Task | Category | Description |
 |------|----------|-------------|

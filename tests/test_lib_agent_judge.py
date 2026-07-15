@@ -13,7 +13,11 @@ SCRIPTS_DIR = ROOT / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from lib_agent import _ollama_native_chat_endpoint, call_judge_api  # noqa: E402
+from lib_agent import (  # noqa: E402
+    _ollama_native_chat_endpoint,
+    _openai_compat_chat_endpoint,
+    call_judge_api,
+)
 
 
 class _FakeResponse:
@@ -225,6 +229,56 @@ class OllamaJudgeTests(unittest.TestCase):
             endpoint = _ollama_native_chat_endpoint()
 
         self.assertEqual(endpoint, "http://judge.example.test:11434/api/chat")
+
+
+class LemonadeJudgeTests(unittest.TestCase):
+    def test_openai_compat_chat_endpoint_appends_chat_completions(self) -> None:
+        endpoint = _openai_compat_chat_endpoint("http://127.0.0.1:13305/api/v1/")
+
+        self.assertEqual(endpoint, "http://127.0.0.1:13305/api/v1/chat/completions")
+
+    def test_openai_compat_chat_endpoint_accepts_full_endpoint(self) -> None:
+        endpoint = _openai_compat_chat_endpoint(
+            "http://127.0.0.1:8002/v1/chat/completions"
+        )
+
+        self.assertEqual(endpoint, "http://127.0.0.1:8002/v1/chat/completions")
+
+    def test_call_judge_api_lemonade_posts_to_local_openai_compat_endpoint(self) -> None:
+        captured_request = None
+
+        def fake_urlopen(req, timeout):
+            nonlocal captured_request
+            captured_request = req
+            self.assertEqual(timeout, 17.0)
+            return _FakeResponse()
+
+        env = {
+            "LEMONADE_JUDGE_BASE_URL": "http://127.0.0.1:8002/v1",
+            "LEMONADE_API_KEY": "local-key",
+        }
+        with patch.dict(os.environ, env, clear=True), patch(
+            "lib_agent.request.urlopen", side_effect=fake_urlopen
+        ):
+            result = call_judge_api(
+                prompt="grade this",
+                model="lemonade/Qwen3-Coder-30B-A3B-Instruct-GGUF",
+                timeout_seconds=17.0,
+            )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["text"], '{"total": 1.0}')
+        self.assertIsNotNone(captured_request)
+        self.assertEqual(
+            captured_request.full_url,
+            "http://127.0.0.1:8002/v1/chat/completions",
+        )
+        self.assertEqual(captured_request.headers["Authorization"], "Bearer local-key")
+
+        payload = json.loads(captured_request.data.decode("utf-8"))
+        self.assertEqual(payload["model"], "Qwen3-Coder-30B-A3B-Instruct-GGUF")
+        self.assertEqual(payload["temperature"], 0.0)
+        self.assertEqual(payload["max_completion_tokens"], 2048)
 
 
 if __name__ == "__main__":
