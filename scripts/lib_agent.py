@@ -327,15 +327,20 @@ def ensure_agent_exists(
                 data = {}
 
         key_ref = api_key if api_key else "${OPENAI_API_KEY}"
+        provider_id, separator, provider_model_id = model_id.partition("/")
+        if not separator:
+            provider_id = "custom"
+            provider_model_id = model_id
+
         providers = data.setdefault("models", {}).setdefault("providers", {})
         data["models"]["mode"] = "merge"
-        providers["custom"] = {
+        providers[provider_id] = {
             "baseUrl": base_url,
             "apiKey": key_ref,
             "api": "openai-completions",
             "models": [
                 {
-                    "id": model_id,
+                    "id": provider_model_id,
                     "name": model_id,
                     "reasoning": False,
                     "input": ["text"],
@@ -344,11 +349,12 @@ def ensure_agent_exists(
                 }
             ],
         }
-        data["defaultProvider"] = "custom"
-        data["defaultModel"] = model_id
+        data["defaultProvider"] = provider_id
+        data["defaultModel"] = provider_model_id
         bench_models.write_text(json.dumps(data, indent=2, ensure_ascii=False), "utf-8")
         logger.info(
-            "Configured custom provider (%s) with model %s for agent %s",
+            "Configured %s provider (%s) with model %s for agent %s",
+            provider_id,
             base_url,
             model_id,
             agent_id,
@@ -816,6 +822,7 @@ def execute_openclaw_task(
     output_dir: Optional[Path] = None,
     verbose: bool = False,
     thinking_level: Optional[str] = None,
+    local_mode: bool = False,
 ) -> Dict[str, Any]:
     logger.info("🤖 Agent [%s] starting task: %s", agent_id, task.task_id)
     logger.info("   Task: %s", task.name)
@@ -839,8 +846,10 @@ def execute_openclaw_task(
         else:
             fws_env = start_fws()
 
-    # Use --local for fws tasks so env vars propagate to the agent
-    use_local = fws_env is not None
+    # Use --local for fws tasks so env vars propagate to the agent. Custom
+    # endpoints should also run embedded: they are local/private by design and
+    # must not depend on a separately running OpenClaw gateway.
+    use_local = fws_env is not None or local_mode
 
     start_time = time.time()
     workspace = prepare_task_workspace(skill_dir, run_id, task, agent_id)
