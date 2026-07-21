@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -279,6 +280,84 @@ class LemonadeJudgeTests(unittest.TestCase):
         self.assertEqual(payload["model"], "Qwen3-Coder-30B-A3B-Instruct-GGUF")
         self.assertEqual(payload["temperature"], 0.0)
         self.assertEqual(payload["max_completion_tokens"], 2048)
+
+
+class CopilotJudgeTests(unittest.TestCase):
+    def test_call_judge_api_copilot_uses_default_model_and_safe_options(self) -> None:
+        completed = subprocess.CompletedProcess(
+            args=["copilot"], returncode=0, stdout='{"total": 0.75}', stderr=""
+        )
+        with patch("lib_agent.subprocess.run", return_value=completed) as run:
+            result = call_judge_api(prompt="grade this", model="copilot", timeout_seconds=12.5)
+
+        self.assertEqual(result, {"status": "success", "text": '{"total": 0.75}'})
+        run.assert_called_once()
+        cmd = run.call_args.args[0]
+        self.assertEqual(cmd[0], "copilot")
+        self.assertNotIn("--model", cmd)
+        self.assertIn("--allow-all-tools", cmd)
+        self.assertIn("--available-tools=", cmd)
+        self.assertIn("--no-custom-instructions", cmd)
+        self.assertIn("--disable-builtin-mcps", cmd)
+        self.assertIn("--disallow-temp-dir", cmd)
+        self.assertIn("--no-remote", cmd)
+        self.assertIn("--no-remote-export", cmd)
+        self.assertEqual(run.call_args.kwargs["timeout"], 12.5)
+        self.assertEqual(
+            run.call_args.kwargs["input"],
+            "You are a strict grading function. "
+            "Respond with ONLY a JSON object, no prose, no markdown fences, no extra text."
+            "\n\ngrade this",
+        )
+
+    def test_call_judge_api_copilot_passes_requested_model(self) -> None:
+        completed = subprocess.CompletedProcess(
+            args=["copilot"], returncode=0, stdout='{"total": 1.0}', stderr=""
+        )
+        with patch("lib_agent.subprocess.run", return_value=completed) as run:
+            result = call_judge_api(prompt="grade this", model="copilot:auto")
+
+        self.assertEqual(result, {"status": "success", "text": '{"total": 1.0}'})
+        cmd = run.call_args.args[0]
+        self.assertEqual(cmd[cmd.index("--model") + 1], "auto")
+
+    def test_call_judge_api_copilot_rejects_empty_model_suffix(self) -> None:
+        result = call_judge_api(prompt="grade this", model="copilot:")
+
+        self.assertEqual(
+            result,
+            {"status": "error", "text": "", "error": "Copilot model cannot be empty"},
+        )
+
+    def test_call_judge_api_copilot_handles_missing_cli_timeout_and_exit_error(self) -> None:
+        with patch("lib_agent.subprocess.run", side_effect=FileNotFoundError):
+            missing = call_judge_api(prompt="grade this", model="copilot")
+        self.assertEqual(missing["error"], "copilot CLI not found")
+
+        with patch("lib_agent.subprocess.run", side_effect=subprocess.TimeoutExpired("copilot", 5)):
+            timeout = call_judge_api(prompt="grade this", model="copilot")
+        self.assertEqual(timeout, {"status": "timeout", "text": "", "error": "copilot timed out"})
+
+        completed = subprocess.CompletedProcess(
+            args=["copilot"], returncode=2, stdout="", stderr="model unavailable"
+        )
+        with patch("lib_agent.subprocess.run", return_value=completed):
+            failed = call_judge_api(prompt="grade this", model="copilot:auto")
+        self.assertEqual(failed["status"], "error")
+        self.assertEqual(failed["error"], "copilot exit 2: model unavailable")
+
+    def test_call_judge_api_copilot_marks_quota_exhaustion_as_non_retriable(self) -> None:
+        completed = subprocess.CompletedProcess(
+            args=["copilot"],
+            returncode=1,
+            stdout="You have exceeded your monthly quota",
+            stderr="",
+        )
+        with patch("lib_agent.subprocess.run", return_value=completed):
+            result = call_judge_api(prompt="grade this", model="copilot:auto")
+
+        self.assertEqual(result["status"], "quota_exceeded")
+        self.assertIn("exceeded your monthly quota", result["error"])
 
 
 if __name__ == "__main__":

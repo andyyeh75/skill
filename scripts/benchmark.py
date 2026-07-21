@@ -242,7 +242,8 @@ def _parse_args() -> argparse.Namespace:
             "openrouter/anthropic/claude-haiku-4.5. Set to a model ID to call its API "
             "directly (e.g. kilo/anthropic/claude-sonnet-4-5, openai/gpt-4o, "
             "anthropic/claude-sonnet-4-5-20250514, ollama/llama3.1, "
-            "lemonade/Qwen3-Coder-30B-A3B-Instruct-GGUF, claude)"
+            "lemonade/Qwen3-Coder-30B-A3B-Instruct-GGUF, claude, "
+            "copilot, copilot:auto, copilot:<model>)"
         ),
     )
     parser.add_argument(
