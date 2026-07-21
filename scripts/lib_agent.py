@@ -327,15 +327,20 @@ def ensure_agent_exists(
                 data = {}
 
         key_ref = api_key if api_key else "${OPENAI_API_KEY}"
+        provider_id, separator, provider_model_id = model_id.partition("/")
+        if not separator:
+            provider_id = "custom"
+            provider_model_id = model_id
+
         providers = data.setdefault("models", {}).setdefault("providers", {})
         data["models"]["mode"] = "merge"
-        providers["custom"] = {
+        providers[provider_id] = {
             "baseUrl": base_url,
             "apiKey": key_ref,
             "api": "openai-completions",
             "models": [
                 {
-                    "id": model_id,
+                    "id": provider_model_id,
                     "name": model_id,
                     "reasoning": False,
                     "input": ["text"],
@@ -344,11 +349,12 @@ def ensure_agent_exists(
                 }
             ],
         }
-        data["defaultProvider"] = "custom"
-        data["defaultModel"] = model_id
+        data["defaultProvider"] = provider_id
+        data["defaultModel"] = provider_model_id
         bench_models.write_text(json.dumps(data, indent=2, ensure_ascii=False), "utf-8")
         logger.info(
-            "Configured custom provider (%s) with model %s for agent %s",
+            "Configured %s provider (%s) with model %s for agent %s",
+            provider_id,
             base_url,
             model_id,
             agent_id,
@@ -816,6 +822,7 @@ def execute_openclaw_task(
     output_dir: Optional[Path] = None,
     verbose: bool = False,
     thinking_level: Optional[str] = None,
+    local_mode: bool = False,
 ) -> Dict[str, Any]:
     logger.info("🤖 Agent [%s] starting task: %s", agent_id, task.task_id)
     logger.info("   Task: %s", task.name)
@@ -839,8 +846,10 @@ def execute_openclaw_task(
         else:
             fws_env = start_fws()
 
-    # Use --local for fws tasks so env vars propagate to the agent
-    use_local = fws_env is not None
+    # Use --local for fws tasks so env vars propagate to the agent. Custom
+    # endpoints should also run embedded: they are local/private by design and
+    # must not depend on a separately running OpenClaw gateway.
+    use_local = fws_env is not None or local_mode
 
     start_time = time.time()
     workspace = prepare_task_workspace(skill_dir, run_id, task, agent_id)
@@ -1238,11 +1247,14 @@ def call_judge_api(
       - anthropic/*  -> Anthropic Messages API
       - openai/*     -> OpenAI chat completions API
       - claude       -> headless Claude CLI (claude -p)
+      - copilot[:*]  -> GitHub Copilot CLI (subscription-backed)
 
     Returns {"status": str, "text": str, "error"?: str}.
     """
     if model == "claude" or model.startswith("claude:"):
         return _judge_via_claude_cli(prompt, model, timeout_seconds)
+    if model == "copilot" or model.startswith("copilot:"):
+        return _judge_via_copilot_cli(prompt, model, timeout_seconds)
     if model.startswith("kilo/"):
         return _judge_via_kilo(prompt, model, timeout_seconds)
     if model.startswith("ollama/"):
@@ -1550,4 +1562,71 @@ def _judge_via_claude_cli(prompt: str, model: str, timeout_seconds: float) -> Di
         return {"status": "timeout", "text": "", "error": "claude -p timed out"}
     if result.returncode != 0:
         return {"status": "error", "text": "", "error": f"claude exit {result.returncode}: {result.stderr[:300]}"}
+    return {"status": "success", "text": result.stdout}
+
+
+def _judge_via_copilot_cli(prompt: str, model: str, timeout_seconds: float) -> Dict[str, Any]:
+    """Use the subscription-backed GitHub Copilot CLI as a JSON judge.
+
+    ``copilot`` uses the CLI's configured/default model. ``copilot:<model>``
+    passes the suffix to Copilot's ``--model`` flag (for example,
+    ``copilot:auto`` or ``copilot:gpt-5.4``).
+
+    Judge prompts contain all allowed grading evidence, so the CLI is started
+    without tools, repository instructions, MCP servers, temporary-directory
+    access, or remote-session features.
+    """
+    cmd: List[str] = [
+        "copilot",
+        "--silent",
+        "--no-color",
+        "--stream",
+        "off",
+        # Copilot requires automatic approval in non-interactive mode. The
+        # empty --available-tools allowlist below still means there are no
+        # tools to approve or expose to the model.
+        "--allow-all-tools",
+        "--no-ask-user",
+        "--no-custom-instructions",
+        "--disable-builtin-mcps",
+        "--disallow-temp-dir",
+        "--no-remote",
+        "--no-remote-export",
+        "--available-tools=",
+    ]
+    if ":" in model:
+        _, cli_model = model.split(":", 1)
+        if not cli_model:
+            return {"status": "error", "text": "", "error": "Copilot model cannot be empty"}
+        cmd.extend(["--model", cli_model])
+
+    try:
+        # Send the potentially large rubric/transcript through stdin instead
+        # of the command line. Copilot treats piped stdin as a non-interactive
+        # prompt when no -p/--prompt argument is present.
+        result = subprocess.run(
+            cmd,
+            input=f"{_JUDGE_SYSTEM_MSG}\n\n{prompt}",
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except FileNotFoundError:
+        return {"status": "error", "text": "", "error": "copilot CLI not found"}
+    except subprocess.TimeoutExpired:
+        return {"status": "timeout", "text": "", "error": "copilot timed out"}
+
+    if result.returncode != 0:
+        error_output = result.stderr.strip() or result.stdout.strip()
+        status = (
+            "quota_exceeded"
+            if "exceeded your monthly quota" in error_output.lower()
+            else "error"
+        )
+        return {
+            "status": status,
+            "text": "",
+            "error": f"copilot exit {result.returncode}: {error_output[:300]}",
+        }
     return {"status": "success", "text": result.stdout}
