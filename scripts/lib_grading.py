@@ -306,7 +306,8 @@ def _grade_llm_judge(
             "   [VERBOSE] Transcript summary for judge (first 1000 chars):\n%s",
             transcript_summary[:1000],
         )
-    workspace_content = _read_workspace_files(execution_result.get("workspace", ""))
+    workspace_path = execution_result.get("workspace", "")
+    workspace_content = _read_workspace_files(workspace_path)
     if verbose and workspace_content:
         logger.info(
             "   [VERBOSE] Workspace files passed to judge (first 500 chars):\n%s",
@@ -340,6 +341,7 @@ def _grade_llm_judge(
         logger.info("   [VERBOSE] Cache MISS for %s (key=%s)", task.task_id, cache_key[:8])
     
     prompt = _build_judge_prompt(task, transcript_summary, rubric, workspace_content)
+    using_reduced_evidence = False
 
     max_judge_attempts = 2
     raw_parsed: Dict[str, Any] = {}
@@ -364,6 +366,28 @@ def _grade_llm_judge(
                     max_judge_attempts,
                     judge_result.get("error", judge_result.get("status")),
                 )
+                if (
+                    not using_reduced_evidence
+                    and _is_copilot_context_limit_error(judge_model, judge_result)
+                ):
+                    workspace_content = _read_workspace_files(
+                        workspace_path,
+                        task_id=task.task_id,
+                        evidence_aware=True,
+                    )
+                    prompt = _build_judge_prompt(
+                        task, transcript_summary, rubric, workspace_content
+                    )
+                    using_reduced_evidence = True
+                    logger.warning(
+                        "Copilot context limit exceeded for %s; retrying with "
+                        "evidence-aware workspace reduction",
+                        task.task_id,
+                    )
+                    continue
+                if judge_result.get("status") == "quota_exceeded":
+                    logger.warning("Judge quota exhausted; not retrying %s", task.task_id)
+                    break
                 if attempt < max_judge_attempts - 1:
                     time.sleep(2**attempt)
                     continue
@@ -566,8 +590,43 @@ def _summarize_transcript(transcript: List[Dict[str, Any]]) -> str:
     return "\n".join(summary_parts)
 
 
-def _read_workspace_files(workspace_path: str) -> str:
-    """Read user-created text files from workspace to provide grading context."""
+_TASK_WORKSPACE_EVIDENCE_FILES = {
+    # yt-dlp creates large machine-readable metadata and subtitle artifacts for
+    # this task.  The rubric evaluates the cleaned transcript and final summary,
+    # so send only those agent deliverables to the LLM judge.
+    "task_video_transcript_extraction": {
+        "transcript.txt",
+        "video_summary.md",
+    },
+}
+
+_REDUCED_EVIDENCE_MAX_FILE_CHARS = 64_000
+_REDUCED_EVIDENCE_MAX_TOTAL_CHARS = 192_000
+_COPILOT_CONTEXT_LIMIT_RE = re.compile(
+    r"prompt token count of \d+ exceeds the limit of \d+", re.IGNORECASE
+)
+
+
+def _is_copilot_context_limit_error(
+    judge_model: str, judge_result: Dict[str, Any]
+) -> bool:
+    if not (judge_model == "copilot" or judge_model.startswith("copilot:")):
+        return False
+    error_text = str(judge_result.get("error", ""))
+    return bool(_COPILOT_CONTEXT_LIMIT_RE.search(error_text))
+
+
+def _read_workspace_files(
+    workspace_path: str,
+    task_id: str = "",
+    evidence_aware: bool = False,
+) -> str:
+    """Read relevant user-created text files for the LLM judge.
+
+    Most tasks retain the existing all-text-files behavior.  Tasks with large
+    intermediate artifacts may define an explicit evidence allowlist so raw
+    source data does not overwhelm the judge context window.
+    """
     if not workspace_path:
         return ""
     workspace = Path(workspace_path)
@@ -583,7 +642,11 @@ def _read_workspace_files(workspace_path: str) -> str:
         "AGENTS.md",
     }
     skip_dirs = {".git", ".openclaw", "__pycache__", "node_modules", "skills"}
+    evidence_files = (
+        _TASK_WORKSPACE_EVIDENCE_FILES.get(task_id) if evidence_aware else None
+    )
     file_contents: List[str] = []
+    total_chars = 0
     for f in sorted(workspace.rglob("*")):
         if not f.is_file():
             continue
@@ -593,9 +656,23 @@ def _read_workspace_files(workspace_path: str) -> str:
             continue
         if f.name in skip_names:
             continue
+        if evidence_files is not None and rel.as_posix() not in evidence_files:
+            continue
         try:
             content = f.read_text(encoding="utf-8")
-            file_contents.append(f"### File: {rel}\n{content}")
+            if evidence_aware and evidence_files is None:
+                remaining = _REDUCED_EVIDENCE_MAX_TOTAL_CHARS - total_chars
+                if remaining <= 0:
+                    break
+                content_limit = min(_REDUCED_EVIDENCE_MAX_FILE_CHARS, remaining)
+                if len(content) > content_limit:
+                    content = (
+                        content[:content_limit]
+                        + "\n[Judge evidence truncated to fit Copilot context]"
+                    )
+            section = f"### File: {rel}\n{content}"
+            file_contents.append(section)
+            total_chars += len(section)
         except (OSError, UnicodeDecodeError):
             pass
     return "\n\n".join(file_contents)
@@ -631,6 +708,7 @@ def _build_judge_prompt(
         f"{rubric}\n\n"
         "Score each criterion from 0.0 to 1.0.\n"
         'The "total" field must also be between 0.0 and 1.0, and it must be the arithmetic mean of the criterion scores, not their sum.\n\n'
+        'Keep the "notes" value on one line; do not put literal newline characters inside JSON strings.\n\n'
         "Respond with ONLY this JSON structure (no markdown, no code fences, no extra text):\n"
         '{"scores": {"criterion_name": 0.0}, "total": 0.0, "notes": "brief justification"}'
     )
@@ -801,6 +879,18 @@ def _parse_judge_text(raw_text: str) -> Dict[str, Any]:
     except json.JSONDecodeError:
         pass
 
+    # Some CLI judges wrap a long string value with literal newlines. JSON
+    # requires these control characters to be escaped, so repair only control
+    # characters encountered inside a quoted JSON string before trying again.
+    repaired_text = _escape_json_string_control_chars(raw_text)
+    if repaired_text != raw_text:
+        try:
+            parsed = json.loads(repaired_text)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+
     # Try extracting from code blocks
     code_block_match = re.search(r"```(?:json)?\s*(.*?)\s*```", raw_text, re.DOTALL)
     if code_block_match:
@@ -861,6 +951,45 @@ def _parse_judge_text(raw_text: str) -> Dict[str, Any]:
         "Failed to parse judge text response. Raw text (first 500 chars): %s", raw_text[:500]
     )
     return {}
+
+
+def _escape_json_string_control_chars(text: str) -> str:
+    """Repair CLI-inserted JSON control-character wrapping."""
+    escaped: List[str] = []
+    in_string = False
+    previous_was_backslash = False
+
+    for char in text:
+        if in_string:
+            if previous_was_backslash:
+                escaped.append(char)
+                previous_was_backslash = False
+                continue
+            if char == "\\":
+                escaped.append(char)
+                previous_was_backslash = True
+                continue
+            if char == '"':
+                in_string = False
+            elif char == "\n":
+                escaped.append("\\n")
+                continue
+            elif char == "\r":
+                escaped.append("\\r")
+                continue
+            elif char == "\t":
+                escaped.append("\\t")
+                continue
+        elif char == '"':
+            in_string = True
+        elif char in {"\n", "\r", "\t"}:
+            # Outside strings, JSON whitespace is insignificant. Removing it
+            # also repairs arbitrary CLI wrapping inside a numeric token such
+            # as ``1.\n0``.
+            continue
+        escaped.append(char)
+
+    return "".join(escaped)
 
 
 def _normalize_judge_response(parsed: Dict[str, Any]) -> Dict[str, Any]:
