@@ -32,6 +32,12 @@ class ModelValidationError(Exception):
 
 MAX_OPENCLAW_MESSAGE_CHARS = int(os.environ.get("PINCHBENCH_MAX_MSG_CHARS", "8000"))
 JUDGE_MAX_MSG_CHARS = int(os.environ.get("PINCHBENCH_JUDGE_MAX_MSG_CHARS", "3000"))
+# Custom endpoints otherwise retain the historic generic 200k/8k profile.  Let a
+# benchmark supply the server's actual context contract explicitly.
+CUSTOM_ENDPOINT_CONTEXT_WINDOW = int(
+    os.environ.get("PINCHBENCH_CUSTOM_CONTEXT_WINDOW", "200000")
+)
+CUSTOM_ENDPOINT_MAX_TOKENS = int(os.environ.get("PINCHBENCH_CUSTOM_MAX_TOKENS", "8192"))
 
 # Valid thinking levels for OpenClaw reasoning depth
 VALID_THINKING_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh", "adaptive")
@@ -344,8 +350,8 @@ def ensure_agent_exists(
                     "name": model_id,
                     "reasoning": False,
                     "input": ["text"],
-                    "contextWindow": 200000,
-                    "maxTokens": 8192,
+                    "contextWindow": CUSTOM_ENDPOINT_CONTEXT_WINDOW,
+                    "maxTokens": CUSTOM_ENDPOINT_MAX_TOKENS,
                 }
             ],
         }
@@ -353,11 +359,14 @@ def ensure_agent_exists(
         data["defaultModel"] = provider_model_id
         bench_models.write_text(json.dumps(data, indent=2, ensure_ascii=False), "utf-8")
         logger.info(
-            "Configured %s provider (%s) with model %s for agent %s",
+            "Configured %s provider (%s) with model %s for agent %s "
+            "(contextWindow=%s, maxTokens=%s)",
             provider_id,
             base_url,
             model_id,
             agent_id,
+            CUSTOM_ENDPOINT_CONTEXT_WINDOW,
+            CUSTOM_ENDPOINT_MAX_TOKENS,
         )
     elif main_models.exists():
         # Standard OpenRouter flow — copy main's models.json and set defaults
