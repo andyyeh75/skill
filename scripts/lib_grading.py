@@ -660,19 +660,30 @@ def _read_workspace_files(
             continue
         try:
             content = f.read_text(encoding="utf-8")
-            if evidence_aware and evidence_files is None:
-                remaining = _REDUCED_EVIDENCE_MAX_TOTAL_CHARS - total_chars
+            section_header = f"### File: {rel}\n"
+            separator = "\n\n" if file_contents else ""
+            if evidence_aware:
+                remaining = (
+                    _REDUCED_EVIDENCE_MAX_TOTAL_CHARS
+                    - total_chars
+                    - len(separator)
+                    - len(section_header)
+                )
                 if remaining <= 0:
                     break
                 content_limit = min(_REDUCED_EVIDENCE_MAX_FILE_CHARS, remaining)
                 if len(content) > content_limit:
-                    content = (
-                        content[:content_limit]
-                        + "\n[Judge evidence truncated to fit Copilot context]"
-                    )
-            section = f"### File: {rel}\n{content}"
+                    truncation_marker = "\n[Judge evidence truncated to fit Copilot context]"
+                    if content_limit > len(truncation_marker):
+                        content = (
+                            content[: content_limit - len(truncation_marker)]
+                            + truncation_marker
+                        )
+                    else:
+                        content = content[:content_limit]
+            section = f"{section_header}{content}"
             file_contents.append(section)
-            total_chars += len(section)
+            total_chars += len(separator) + len(section)
         except (OSError, UnicodeDecodeError):
             pass
     return "\n\n".join(file_contents)

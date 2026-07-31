@@ -218,6 +218,32 @@ class WorkspaceFilesForJudgeTests(unittest.TestCase):
         self.assertIn("video.info.json", content)
         self.assertIn("raw metadata", content)
 
+    def test_evidence_aware_allowlisted_content_respects_total_character_cap(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            (workspace / "transcript.txt").write_text("A" * 192_000, encoding="utf-8")
+
+            content = _read_workspace_files(
+                str(workspace),
+                task_id="task_video_transcript_extraction",
+                evidence_aware=True,
+            )
+
+        self.assertLessEqual(len(content), 192_000)
+        self.assertIn("### File: transcript.txt", content)
+        self.assertIn("[Judge evidence truncated to fit Copilot context]", content)
+
+    def test_evidence_aware_content_includes_headers_within_total_character_cap(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            for filename in ("a.txt", "b.txt", "c.txt"):
+                (workspace / filename).write_text("A" * 64_000, encoding="utf-8")
+
+            content = _read_workspace_files(str(workspace), evidence_aware=True)
+
+        self.assertLessEqual(len(content), 192_000)
+        self.assertIn("[Judge evidence truncated to fit Copilot context]", content)
+
     def test_compute_cache_key_changes_when_workspace_content_changes(self) -> None:
         first_key = _compute_cache_key(
             "task_report",
