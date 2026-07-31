@@ -378,7 +378,32 @@ def _grade_llm_judge(
                     prompt = _build_judge_prompt(
                         task, transcript_summary, rubric, workspace_content
                     )
+                    cache_key = _compute_cache_key(
+                        task.task_id,
+                        transcript_summary,
+                        rubric,
+                        judge_model,
+                        workspace_content,
+                    )
                     using_reduced_evidence = True
+                    if cache_key in _judge_cache:
+                        cached = _judge_cache[cache_key]
+                        get_judge_cache_stats._hits = getattr(
+                            get_judge_cache_stats, "_hits", 0
+                        ) + 1
+                        logger.info(
+                            "Cache HIT for reduced judge evidence for %s (key=%s)",
+                            task.task_id,
+                            cache_key[:8],
+                        )
+                        return GradeResult(
+                            task_id=task.task_id,
+                            score=cached["score"],
+                            max_score=cached["max_score"],
+                            grading_type="llm_judge",
+                            breakdown=cached.get("breakdown", {}),
+                            notes=cached.get("notes", "") + " [cached]",
+                        )
                     logger.warning(
                         "Copilot context limit exceeded for %s; retrying with "
                         "evidence-aware workspace reduction",
@@ -603,7 +628,8 @@ _TASK_WORKSPACE_EVIDENCE_FILES = {
 _REDUCED_EVIDENCE_MAX_FILE_CHARS = 64_000
 _REDUCED_EVIDENCE_MAX_TOTAL_CHARS = 192_000
 _COPILOT_CONTEXT_LIMIT_RE = re.compile(
-    r"prompt token count of \d+ exceeds the limit of \d+", re.IGNORECASE
+    r"prompt token count(?: of)?\s*[\d,]+\s+exceeds(?: the)? limit(?: of)?\s*[\d,]+",
+    re.IGNORECASE,
 )
 
 
@@ -658,21 +684,32 @@ def _read_workspace_files(
             continue
         if evidence_files is not None and rel.as_posix() not in evidence_files:
             continue
+        section_header = f"### File: {rel}\n"
+        separator = "\n\n" if file_contents else ""
         try:
             content = f.read_text(encoding="utf-8")
-            if evidence_aware and evidence_files is None:
-                remaining = _REDUCED_EVIDENCE_MAX_TOTAL_CHARS - total_chars
+            if evidence_aware:
+                remaining = (
+                    _REDUCED_EVIDENCE_MAX_TOTAL_CHARS
+                    - total_chars
+                    - len(separator)
+                    - len(section_header)
+                )
                 if remaining <= 0:
                     break
                 content_limit = min(_REDUCED_EVIDENCE_MAX_FILE_CHARS, remaining)
                 if len(content) > content_limit:
-                    content = (
-                        content[:content_limit]
-                        + "\n[Judge evidence truncated to fit Copilot context]"
-                    )
-            section = f"### File: {rel}\n{content}"
+                    truncation_marker = "\n[Judge evidence truncated to fit Copilot context]"
+                    if content_limit > len(truncation_marker):
+                        content = (
+                            content[: content_limit - len(truncation_marker)]
+                            + truncation_marker
+                        )
+                    else:
+                        content = content[:content_limit]
+            section = f"{section_header}{content}"
             file_contents.append(section)
-            total_chars += len(section)
+            total_chars += len(separator) + len(section)
         except (OSError, UnicodeDecodeError):
             pass
     return "\n\n".join(file_contents)
