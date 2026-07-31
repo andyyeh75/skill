@@ -23,6 +23,7 @@ from lib_grading import (  # noqa: E402
     GradeResult,
 )
 from lib_tasks import Task  # noqa: E402
+import lib_grading  # noqa: E402
 
 
 class JudgeNormalizationTests(unittest.TestCase):
@@ -218,6 +219,24 @@ class WorkspaceFilesForJudgeTests(unittest.TestCase):
         self.assertIn("video.info.json", content)
         self.assertIn("raw metadata", content)
 
+    def test_reduced_video_evidence_is_bounded_even_for_allowed_files(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            (workspace / "transcript.txt").write_text("T" * 70_000, encoding="utf-8")
+            (workspace / "video_summary.md").write_text("summary", encoding="utf-8")
+            (workspace / "video.info.json").write_text("raw metadata", encoding="utf-8")
+
+            content = _read_workspace_files(
+                str(workspace),
+                task_id="task_video_transcript_extraction",
+                evidence_aware=True,
+            )
+
+        self.assertLessEqual(len(content), 192_000)
+        self.assertIn("[Judge evidence truncated to fit Copilot context]", content)
+        self.assertIn("summary", content)
+        self.assertNotIn("raw metadata", content)
+
     def test_compute_cache_key_changes_when_workspace_content_changes(self) -> None:
         first_key = _compute_cache_key(
             "task_report",
@@ -298,6 +317,67 @@ class JudgeRetryTests(unittest.TestCase):
         self.assertIn("clean transcript", reduced_prompt)
         self.assertIn("structured summary", reduced_prompt)
         self.assertEqual(result.score, 1.0)
+
+    def test_copilot_context_overflow_uses_cached_reduced_evidence(self) -> None:
+        task = Task(
+            task_id="task_video_transcript_extraction",
+            name="Video Transcript Extraction and Summary",
+            category="coding",
+            grading_type="llm_judge",
+            timeout_seconds=300,
+            workspace_files=[],
+            prompt="Create transcript.txt and video_summary.md.",
+            expected_behavior="Create both deliverables.",
+            grading_criteria=["Creates the transcript and summary"],
+            llm_judge_rubric="Grade the transcript and summary.",
+        )
+        context_failure = {
+            "status": "error",
+            "text": "",
+            "error": "prompt token count of 1,488,815 exceeds limit of 272,000",
+        }
+
+        with TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            (workspace / "transcript.txt").write_text("clean transcript", encoding="utf-8")
+            (workspace / "video_summary.md").write_text("structured summary", encoding="utf-8")
+            (workspace / "video.info.json").write_text("raw metadata", encoding="utf-8")
+            reduced_content = _read_workspace_files(
+                str(workspace), task.task_id, evidence_aware=True
+            )
+            reduced_key = _compute_cache_key(
+                task.task_id,
+                "",
+                task.llm_judge_rubric,
+                "copilot:auto",
+                reduced_content,
+            )
+            cached = {
+                reduced_key: {
+                    "score": 0.8,
+                    "max_score": 1.0,
+                    "breakdown": {"completion": 0.8},
+                    "notes": "Cached reduced result",
+                }
+            }
+            with patch.object(lib_grading, "_judge_cache", cached), patch(
+                "lib_grading.call_judge_api", return_value=context_failure
+            ) as call:
+                result = grade_task(
+                    task=task,
+                    execution_result={
+                        "status": "success",
+                        "transcript": [],
+                        "workspace": str(workspace),
+                    },
+                    skill_dir=ROOT,
+                    judge_model="copilot:auto",
+                    judge_backend="api",
+                )
+
+        call.assert_called_once()
+        self.assertEqual(result.score, 0.8)
+        self.assertEqual(result.notes, "Cached reduced result [cached]")
 
     def test_quota_exhaustion_is_not_retried(self) -> None:
         task = Task(
