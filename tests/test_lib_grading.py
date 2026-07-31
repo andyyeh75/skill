@@ -15,6 +15,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 from lib_grading import (  # noqa: E402
     _combine_grades,
     _compute_cache_key,
+    _judge_cache,
     _normalize_judge_response,
     _parse_judge_text,
     _parse_judge_response,
@@ -298,6 +299,97 @@ class JudgeRetryTests(unittest.TestCase):
         self.assertIn("clean transcript", reduced_prompt)
         self.assertIn("structured summary", reduced_prompt)
         self.assertEqual(result.score, 1.0)
+
+    def test_context_limit_fallback_caches_under_reduced_evidence_key(self) -> None:
+        """Grade cached after context-limit retry must use the reduced-evidence key.
+
+        The full-evidence key must remain absent so that a future call with the
+        full workspace does NOT get a stale hit from the reduced-evidence run.
+        """
+        task = Task(
+            task_id="task_video_transcript_extraction",
+            name="Video Transcript Extraction and Summary",
+            category="coding",
+            grading_type="llm_judge",
+            timeout_seconds=300,
+            workspace_files=[],
+            prompt="Create transcript.txt and video_summary.md.",
+            expected_behavior="Create both deliverables.",
+            grading_criteria=["Creates the transcript and summary"],
+            llm_judge_rubric="Grade the transcript and summary.",
+        )
+        context_failure = {
+            "status": "error",
+            "text": "",
+            "error": (
+                "copilot exit 1: 400 prompt token count of 1488815 "
+                "exceeds the limit of 272000"
+            ),
+        }
+        judge_success = {
+            "status": "success",
+            "text": '{"scores": {"completion": 1.0}, "total": 1.0, "notes": "Complete"}',
+        }
+
+        import lib_grading
+
+        with TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            (workspace / "transcript.txt").write_text("clean transcript", encoding="utf-8")
+            (workspace / "video_summary.md").write_text("structured summary", encoding="utf-8")
+            (workspace / "video.info.json").write_text("raw metadata", encoding="utf-8")
+            execution_result = {
+                "status": "success",
+                "transcript": [],
+                "workspace": str(workspace),
+            }
+
+            # Compute what the full-evidence and reduced-evidence keys should be.
+            full_workspace = _read_workspace_files(str(workspace))
+            reduced_workspace = _read_workspace_files(
+                str(workspace),
+                task_id="task_video_transcript_extraction",
+                evidence_aware=True,
+            )
+            rubric = task.llm_judge_rubric
+            transcript_summary = ""  # empty transcript → empty summary
+            judge_model = "copilot:gpt-5.4-mini"
+
+            full_key = _compute_cache_key(
+                task.task_id, transcript_summary, rubric, judge_model, full_workspace
+            )
+            reduced_key = _compute_cache_key(
+                task.task_id, transcript_summary, rubric, judge_model, reduced_workspace
+            )
+
+            # Sanity: the two keys must differ (reduced workspace differs from full).
+            self.assertNotEqual(full_key, reduced_key)
+
+            # Clear the cache before the test so no prior run leaks in.
+            lib_grading._judge_cache.clear()
+
+            with patch(
+                "lib_grading.call_judge_api",
+                side_effect=[context_failure, judge_success],
+            ):
+                result = grade_task(
+                    task=task,
+                    execution_result=execution_result,
+                    skill_dir=ROOT,
+                    judge_model=judge_model,
+                    judge_backend="api",
+                )
+
+            # The grade should be 1.0 from the successful retry.
+            self.assertEqual(result.score, 1.0)
+
+            # The result must be cached under the reduced-evidence key.
+            self.assertIn(reduced_key, lib_grading._judge_cache)
+
+            # The full-evidence key must NOT appear in the cache; storing a
+            # reduced-evidence grade under the full-evidence key would cause a
+            # future full-evidence run to incorrectly reuse it.
+            self.assertNotIn(full_key, lib_grading._judge_cache)
 
     def test_quota_exhaustion_is_not_retried(self) -> None:
         task = Task(

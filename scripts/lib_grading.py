@@ -379,6 +379,15 @@ def _grade_llm_judge(
                         task, transcript_summary, rubric, workspace_content
                     )
                     using_reduced_evidence = True
+                    # Recompute cache key from the reduced-evidence workspace so
+                    # the successful grade is not stored under the full-evidence key.
+                    cache_key = _compute_cache_key(
+                        task.task_id,
+                        transcript_summary,
+                        rubric,
+                        judge_model,
+                        workspace_content,
+                    )
                     logger.warning(
                         "Copilot context limit exceeded for %s; retrying with "
                         "evidence-aware workspace reduction",
