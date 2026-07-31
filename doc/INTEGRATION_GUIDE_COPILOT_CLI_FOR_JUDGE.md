@@ -1,6 +1,6 @@
 # GitHub Copilot CLI Judge Integration for PinchBench
 
-**Status:** Implemented and exercised in a full 147-task PinchBench evaluation on 2026-07-20/21.
+**Status:** Implemented and exercised in a full 147-task PinchBench evaluation on 2026-07-20/21. The Copilot context-limit fallback was also revalidated on 2026-07-31.
 **Judge path:** Local GitHub Copilot CLI authenticated through the user's Copilot subscription.
 **Pinned model used for the completed run:** copilot:gpt-5.4-mini.
 
@@ -54,7 +54,7 @@ copilot --version
 copilot login
 ```
 
-The tested installation resolves to /home/intel/.local/bin/copilot (Copilot CLI 1.0.73). A system-specific version or install path may differ.
+The latest local validation resolved to `/home/intel/.local/bin/copilot` (Copilot CLI 1.0.77). A system-specific version or install path may differ.
 
 If npm install -g @github/copilot fails with EACCES while trying to write under /opt/codex-desktop/resources/node-runtime, use the user-local command above. Installing with sudo can leave a root-owned package attached to the desktop runtime and is not the supported PinchBench setup.
 
@@ -64,13 +64,17 @@ Confirm that login and the chosen model work before starting a benchmark:
 
 ```bash
 copilot -sp 'Return only OK' --model auto \
-  --allow-all-tools --available-tools=
+  --allow-all-tools --no-ask-user --no-custom-instructions \
+  --disable-builtin-mcps --disallow-temp-dir \
+  --no-remote --no-remote-export --available-tools=
 
 copilot -sp 'Return only OK' --model gpt-5.4-mini \
-  --allow-all-tools --available-tools=
+  --allow-all-tools --no-ask-user --no-custom-instructions \
+  --disable-builtin-mcps --disallow-temp-dir \
+  --no-remote --no-remote-export --available-tools=
 ```
 
-The CLI requires --allow-all-tools for non-interactive execution. The empty --available-tools= allowlist means there are no tools for the model to use. PinchBench applies the same principle, plus disables custom instructions, built-in MCP servers, temporary-directory access, and remote session features.
+The CLI requires `--allow-all-tools` for non-interactive execution. The empty `--available-tools=` allowlist means there are no tools for the model to use. These commands mirror PinchBench's safety-relevant CLI options: it also disables custom instructions, built-in MCP servers, temporary-directory access, and remote session features.
 
 If the command reports "You have exceeded your monthly quota", authentication is working but the account does not currently have usable Copilot allowance. Wait for quota renewal or select a model/plan with available allowance; adding an API_KEY does not extend the Copilot subscription quota.
 
@@ -86,6 +90,8 @@ Use a small scoped run before a full suite. Replace the subject model with the m
   --judge copilot:auto \
   --suite task_email \
   --runs 1 \
+  --thinking off \
+  --no-fail-fast \
   --no-upload \
   --output-dir results/copilot_smoke
 ```
@@ -98,6 +104,8 @@ Use a small scoped run before a full suite. Replace the subject model with the m
   --judge copilot:gpt-5.4-mini \
   --suite all \
   --runs 1 \
+  --thinking off \
+  --no-fail-fast \
   --no-upload \
   --output-dir results/lemonade_qwen3_6_35b_spec_copilot_gpt54mini_YYYYMMDD
 ```
@@ -106,13 +114,15 @@ Use a small scoped run before a full suite. Replace the subject model with the m
 
 PinchBench creates a background grading thread by default and snapshots the completed task's workspace before grading. It waits for that grade at the next task-loop boundary before recording progress, so a slow or failed judge can delay visible task progress. Use --no-parallel-judge when debugging sequentially.
 
+Successful grades are cached. For a smoke test intended to prove that Copilot is contacted again, use a new output directory or add `--clear-judge-cache`; otherwise an unchanged task, transcript, rubric, judge identifier, and workspace evidence can legitimately return a cached grade.
+
 ## Implementation details
 
 The production call path is implemented in:
 
-- [scripts/benchmark.py](scripts/benchmark.py): accepts --judge and selects the direct judge backend when it is set.
-- [scripts/lib_grading.py](scripts/lib_grading.py): builds the grading prompt, manages retries, parses the JSON response, combines hybrid scores, and caches valid grades.
-- [scripts/lib_agent.py](scripts/lib_agent.py): dispatches copilot and copilot:* identifiers to _judge_via_copilot_cli().
+- [scripts/benchmark.py](../scripts/benchmark.py): accepts `--judge` and selects the direct judge backend when it is set.
+- [scripts/lib_grading.py](../scripts/lib_grading.py): builds the grading prompt, manages retries, parses the JSON response, combines hybrid scores, and caches valid grades.
+- [scripts/lib_agent.py](../scripts/lib_agent.py): dispatches `copilot` and `copilot:*` identifiers to `_judge_via_copilot_cli()`.
 
 The adapter invokes the CLI approximately as follows (the rubric and evidence are supplied on standard input, not placed on the command line):
 
@@ -143,6 +153,8 @@ The completed integration handles this condition as follows:
 
 This evidence-aware retry regraded task 39 successfully at 0.800 and allowed the remaining 108 tasks to complete. It is deliberately reactive: ordinary tasks retain full evidence; only a genuine Copilot context-limit error enables the reduced-evidence retry.
 
+The fallback was independently revalidated on 2026-07-31 with a 3,066,668-byte synthetic `video.info.json`. Copilot rejected the initial prompt at 2,111,905 tokens; the retry then sent only the two allow-listed deliverables (5,511 characters) and returned a valid 0.91 grade. This validates the live CLI error matcher as well as the retry, rather than only the unit-test path.
+
 The Copilot CLI exposes a --context long_context option, but PinchBench does not set it today, and it must not be treated as a guarantee that a prompt above the service limit will be accepted. Reducing irrelevant raw artifacts is the reliable mitigation. Add a task-specific allowlist whenever a task produces a large machine-generated intermediate file that is not needed by its rubric.
 
 ## Failure behavior and troubleshooting
@@ -162,7 +174,7 @@ Judge failures are not silently converted to a different provider. This is inten
 ## Caching, artifacts, and resuming
 
 - Successful judge grades are cached using task ID, transcript summary, rubric, judge model identifier, and workspace evidence. Changing the judge model or evidence changes the cache key.
-- Agent transcripts are archived under results/<run-id>_transcripts/task_<id>.jsonl.
+- Agent transcripts are archived under `results/<run-id>_transcripts/<task-id>.jsonl` (task IDs themselves commonly start with `task_`).
 - Incremental result JSON is written while the run is active. Preserve it, the benchmark log, and archived transcripts if a run must be resumed or audited.
 - A stopped run cannot be assumed to have a final results JSON. In the 2026-07-21 evaluation, the first 38 grades were reconstructed from the preserved log, task 39 was regraded from preserved artifacts, and ordinals 40–147 came from a completed continuation JSON.
 
@@ -181,10 +193,11 @@ Run the relevant tests with:
 
 ```bash
 PYTHONPATH=scripts .venv/bin/python -m unittest \
-  tests.test_lib_agent_judge tests.test_lib_grading
+  tests.test_lib_agent_judge tests.test_lib_grading \
+  tests.test_lib_agent_configuration
 ```
 
-The full native run using copilot:gpt-5.4-mini covered all 147 ordinals and produced **122.1 / 147.0 (83.1%)**. Its combined report is available at [copilot-grade/copilot_grades/0017_0018_native_report_FINAL_001_147_0721.md](copilot-grade/copilot_grades/0017_0018_native_report_FINAL_001_147_0721.md).
+The full native run using `copilot:gpt-5.4-mini` covered all 147 ordinals and produced **122.1 / 147.0 (83.1%)**. Its combined report is available at [0017_0018_native_report_FINAL_001_147_0721.md](../copilot-grade/copilot_grades/0017_0018_native_report_FINAL_001_147_0721.md).
 
 ## Boundaries
 
