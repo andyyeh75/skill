@@ -4,6 +4,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -12,9 +13,11 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 from benchmark import (  # noqa: E402
+    _build_agent_id,
     _compute_category_scores,
     _compute_efficiency_summary,
     _compute_score_totals,
+    _exceeded_score_cutoff,
 )
 
 
@@ -29,6 +32,32 @@ def _grading(mean: float, max_score: float) -> dict:
 
 
 class BenchmarkScoringTests(unittest.TestCase):
+    @patch("benchmark.os.getpid", return_value=4242)
+    def test_agent_id_defaults_to_run_and_process_suffix(self, _getpid) -> None:
+        agent_id = _build_agent_id("test-model", "0017", "")
+
+        self.assertEqual(agent_id, "bench-test-model-0017-4242")
+
+    @patch("benchmark.os.getpid", return_value=4242)
+    def test_agent_id_retains_explicit_suffix_override(self, _getpid) -> None:
+        agent_id = _build_agent_id("test-model", "0017", "launch@worker")
+
+        self.assertEqual(agent_id, "bench-test-model-launch-worker")
+
+    def test_score_cutoff_respects_threshold_and_hard_timeout(self) -> None:
+        cutoff_seconds = 10.0
+        cases = (
+            ("just below cutoff", {"execution_time": 9.99}, False),
+            ("at cutoff", {"execution_time": 10.0}, True),
+            ("hard timeout", {"execution_time": 1.0, "hard_timeout_exceeded": True}, True),
+        )
+
+        for name, result, expected in cases:
+            with self.subTest(name=name):
+                self.assertEqual(
+                    _exceeded_score_cutoff(result, cutoff_seconds), expected
+                )
+
     def test_score_totals_exclude_skipped_grades(self) -> None:
         totals = _compute_score_totals(
             {
