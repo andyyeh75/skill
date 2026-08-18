@@ -1,6 +1,6 @@
 # GitHub Copilot CLI Judge Integration for PinchBench
 
-**Status:** Implemented and exercised in a full 147-task PinchBench evaluation on 2026-07-20/21. The Copilot context-limit fallback was also revalidated on 2026-07-31.
+**Status:** Implemented and exercised in a full 147-task PinchBench evaluation. The Copilot context-limit fallback was also revalidated.
 **Judge path:** Local GitHub Copilot CLI authenticated through the user's Copilot subscription.
 **Pinned model used for the completed run:** copilot:gpt-5.4-mini.
 
@@ -86,8 +86,8 @@ Use the repository helper to validate the Copilot judge before launching any ben
 # Default 90-second timeout; validates Copilot's configured/default model.
 ./scripts/check_copilot_judge.sh copilot
 
-# Validate a pinned model and retain the result with the run artifacts.
-./scripts/check_copilot_judge.sh copilot:gpt-5.6-sol \
+# Validate a pinned model and retain the result with the run artifacts. (gpt-5.6-sol/terra/luna or any model can be selected.)
+./scripts/check_copilot_judge.sh copilot:gpt-5.4-mini \
   results/my_run/copilot_preflight.log
 ```
 
@@ -219,7 +219,6 @@ PYTHONPATH=scripts .venv/bin/python -m unittest \
   tests.test_lib_agent_configuration
 ```
 
-The full native run using `copilot:gpt-5.4-mini` covered all 147 ordinals and produced **122.1 / 147.0 (83.1%)**. Its combined report is available at [0017_0018_native_report_FINAL_001_147_0721.md](../copilot-grade/copilot_grades/0017_0018_native_report_FINAL_001_147_0721.md).
 
 ## Boundaries
 
