@@ -10,6 +10,7 @@ import os
 import shutil
 import subprocess
 import time
+from typing import Any, Iterable, Tuple
 
 logger = logging.getLogger("pinchbench")
 
@@ -38,7 +39,34 @@ def fws_available() -> bool:
     return shutil.which(FWS_CMD) is not None
 
 
-def start_fws() -> dict:
+def _fws_preflight_checks(prerequisites: Iterable[Any]) -> Tuple[Tuple[str, list[str]], ...]:
+    """Return probes for the CLIs required by one FWS-backed task."""
+    required_clis = {
+        str(requirement).strip().lower()
+        for requirement in prerequisites
+    }
+    checks = []
+    if "cli:gh" in required_clis:
+        checks.append(
+            (
+                "GitHub",
+                ["gh", "issue", "list", "--repo", "testuser/my-project", "--state", "open", "--limit", "1"],
+            )
+        )
+    if "cli:gws" in required_clis:
+        # FWS's Google Workspace fixture is shared by the GWS tasks. Probe
+        # both services exercised by the current integration cohort, but do
+        # not require gws at all for a GitHub-only task.
+        checks.extend(
+            (
+                ("GWS Gmail", ["gws", "gmail", "users", "messages", "list", "--params", '{"userId":"me","q":"is:unread"}']),
+                ("GWS Tasks", ["gws", "tasks", "tasklists", "list"]),
+            )
+        )
+    return tuple(checks)
+
+
+def start_fws(prerequisites: Iterable[Any] = ()) -> dict:
     """Start the fws server and set environment variables.
 
     Returns a dict of the original env var values (for restoration).
@@ -101,16 +129,10 @@ def start_fws() -> dict:
 
     logger.info("✅ fws server started, env configured")
 
-    # This is a read-only deployment gate.  It confirms both services used by
-    # the final integration cohort are reachable through the same CLIs the
-    # task agent will use.  Do this after the environment is installed so the
-    # gws discovery cache and gh HTTPS proxy are exercised, not merely the
-    # server's listening socket.
-    checks = (
-        ("GitHub", ["gh", "issue", "list", "--repo", "testuser/my-project", "--state", "open", "--limit", "1"]),
-        ("GWS Gmail", ["gws", "gmail", "users", "messages", "list", "--params", '{"userId":"me","q":"is:unread"}']),
-        ("GWS Tasks", ["gws", "tasks", "tasklists", "list"]),
-    )
+    # This is a read-only deployment gate. Probe only the CLIs declared by
+    # this task, after the environment is installed, so the FWS proxy and GWS
+    # discovery cache are exercised rather than merely the server socket.
+    checks = _fws_preflight_checks(prerequisites)
     failures = []
     for service, command in checks:
         result = subprocess.run(
