@@ -131,19 +131,11 @@ Prefer a separate judge host or provider. This prevents agent inference and
 judge inference from competing for the same local GPU, CPU, memory, or model
 cache.
 
-For an Ollama judge:
-
-```bash
-export OLLAMA_JUDGE_BASE_URL="http://<judge-host>:11434"
-export OLLAMA_JUDGE_NUM_CTX=4096
-export OLLAMA_JUDGE_NUM_PREDICT=2048
-export OLLAMA_JUDGE_KEEP_ALIVE=0
-
 ./scripts/run.sh \
   --model "$MODEL" \
   --base-url "$BASE_URL" \
   --api-key "$API_KEY" \
-  --judge ollama/qwen3-coder:30B \
+  --judge copilot:gpt-5.4-mini \
   --suite automated-only \
   --no-parallel-judge \
   --no-upload \
@@ -165,7 +157,7 @@ export LEMONADE_API_KEY="${OPENAI_API_KEY:-dummy}"
   --model "$MODEL" \
   --base-url "$BASE_URL" \
   --api-key "$API_KEY" \
-  --judge lemonade/Qwen3-Coder-30B-A3B-Instruct-GGUF \
+  --judge copilot:gpt-5.4-mini \
   --suite automated-only \
   --no-parallel-judge \
   --no-upload
@@ -185,7 +177,7 @@ Run the full suite only after the smoke and scored subset are stable:
   --model "$MODEL" \
   --base-url "$BASE_URL" \
   --api-key "$API_KEY" \
-  --judge ollama/qwen3-coder:30B \
+  --judge copilot:gpt-5.4-mini \
   --suite all \
   --no-parallel-judge \
   --no-upload \

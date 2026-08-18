@@ -1,6 +1,6 @@
 ---
 name: pinchbench
-description: Run PinchBench benchmarks to evaluate OpenClaw agent performance across real-world tasks. Use when testing model capabilities, comparing models, submitting benchmark results to the leaderboard, or running local/private judge experiments such as a remote Ollama judge.
+description: Run PinchBench benchmarks to evaluate OpenClaw agent performance across real-world tasks. Use when testing model capabilities, comparing models, submitting benchmark results to the leaderboard.
 metadata:
   author: pinchbench
   version: "2.0.0-rc1"
@@ -18,18 +18,11 @@ PinchBench measures how well LLM models perform as the brain of an OpenClaw agen
 - [uv](https://docs.astral.sh/uv/) package manager or an initialized `.venv`
 - A running OpenClaw instance
 - API credentials for the tested model provider
-- Optional: a local or remote Ollama server for private LLM judging
 - For `--judge copilot` or `--judge copilot:<model>`: the standalone GitHub
   Copilot CLI, authenticated persistently with `copilot login`, and access to
   the requested Copilot model.
 
 ## Quick Start
-
-On Windows, run the environment setup script in the same PowerShell session before starting a remote Ollama judge run. It sets UTF-8 console/Python behavior and points only the judge to the known remote Ollama host:
-
-```powershell
-.\setup-ollama-judge-env.ps1
-```
 
 ```bash
 cd <skill_directory>
@@ -47,95 +40,6 @@ uv run scripts/benchmark.py --model openrouter/anthropic/claude-sonnet-4 --suite
 uv run scripts/benchmark.py --model openrouter/anthropic/claude-sonnet-4 --no-upload
 ```
 
-## Best Known Method: Remote Ollama Judge
-
-Use `--judge ollama/<model>` when the benchmark subject model should still run through OpenClaw, but LLM grading should go directly to an Ollama server. This can ask Ollama's native `/api/chat` endpoint for strict JSON.
-
-1. On the Ollama host, pull the judge model and make sure the server is reachable from the benchmark machine:
-
-```bash
-ollama pull qwen3-coder:30B
-ollama serve
-```
-
-2. On the benchmark machine, point PinchBench's judge at the remote Ollama base URL. Use the host root URL, `/v1`, `/api/chat`, or `/v1/chat/completions`; the benchmark normalizes these to the native `/api/chat` endpoint.
-
-```bash
-export OLLAMA_JUDGE_BASE_URL=http://<ollama-judge-host>:11434
-export OLLAMA_JUDGE_NUM_CTX=4096
-export OLLAMA_JUDGE_NUM_PREDICT=2048
-export OLLAMA_JUDGE_KEEP_ALIVE=0
-```
-
-PowerShell equivalent:
-
-```powershell
-$env:OLLAMA_JUDGE_BASE_URL = "http://<ollama-judge-host>:11434"
-$env:OLLAMA_JUDGE_NUM_CTX = "4096"
-$env:OLLAMA_JUDGE_NUM_PREDICT = "2048"
-$env:OLLAMA_JUDGE_KEEP_ALIVE = "0"
-```
-
-3. Smoke test with a small suite before the full run:
-
-```bash
-uv run scripts/benchmark.py \
-  --model openai/gpt-5.4-mini \
-  --judge ollama/qwen3-coder:30B \
-  --suite task_sanity \
-  --output-dir results/ollama_smoke \
-  --no-upload \
-  --no-parallel-judge \
-  --verbose
-```
-
-4. Run the full local benchmark once the smoke test passes:
-
-```bash
-uv run scripts/benchmark.py \
-  --model openai/gpt-5.4-mini \
-  --judge ollama/qwen3-coder:30B \
-  --suite all \
-  --output-dir results/full_qwen3_coder_$(date +%Y%m%d) \
-  --no-upload \
-  --no-parallel-judge \
-  --no-fail-fast \
-  --verbose
-```
-
-On Windows with the checked-in virtual environment, the command shape is:
-
-```powershell
-.\.venv\Scripts\python.exe scripts\benchmark.py `
-  --model openai/gpt-5.4-mini `
-  --judge ollama/qwen3-coder:30B `
-  --suite all `
-  --output-dir results\full_qwen3_coder_20260623 `
-  --no-upload `
-  --no-parallel-judge `
-  --no-fail-fast `
-  --verbose
-```
-
-### Ollama Judge Options
-
-| Variable | Use |
-| --- | --- |
-| `OLLAMA_JUDGE_BASE_URL` | Remote or local Ollama judge base URL. Defaults to `http://localhost:11434`. |
-| `OLLAMA_API_KEY` | Optional bearer token for an authenticated Ollama proxy. |
-| `OLLAMA_JUDGE_NUM_CTX` | Sets native `options.num_ctx`; lower it if the judge host runs out of KV cache memory. |
-| `OLLAMA_JUDGE_NUM_PREDICT` | Sets native `options.num_predict`; default is `2048`. |
-| `OLLAMA_JUDGE_KEEP_ALIVE` | Sets native `keep_alive`; use `0` to unload the judge model after each request. |
-| `OLLAMA_JUDGE_STREAM` | Set to `1` to consume streamed native chat chunks. |
-
-Operational notes:
-
-- `OLLAMA_JUDGE_BASE_URL` is for direct judge calls only. Keep `OLLAMA_BASE_URL` available for an Ollama-backed agent model or other OpenClaw/runtime configuration.
-- Prefer `--no-parallel-judge` for remote Ollama unless the judge host has enough memory for concurrent model work.
-- Keep `--no-upload` on while comparing private/local judge behavior.
-- Use a date-stamped `--output-dir` so result JSON, transcripts, and logs stay grouped.
-- If the judge returns prose instead of JSON, lower temperature is already forced; try a stronger judge model or reduce context pressure with `OLLAMA_JUDGE_NUM_CTX`.
-
 ## Judge Backends
 
 By default, LLM judging runs through an OpenClaw judge agent. Passing `--judge` switches to direct judge API mode.
@@ -146,7 +50,6 @@ Supported direct judge prefixes:
 - `kilo/<provider>/<model>` using `KILO_API_KEY`
 - `anthropic/<model>` using `ANTHROPIC_API_KEY`
 - `openai/<model>` using `OPENAI_API_KEY`
-- `ollama/<model>` using native Ollama chat
 - `claude` or `claude:<model>` using headless Claude CLI
 - `copilot` or `copilot:<model>` using the authenticated GitHub Copilot CLI
 
@@ -217,7 +120,7 @@ deliberate artifact-collection run where slow local tasks must finish, add:
 This is a multiplier, not a seconds value. A value of `1000` is effectively unlimited and can
 allow runaway tasks to consume excessive time and tokens, so record it with the run and use it
 only for diagnostic or artifact-preservation workflows. See
-`PINCHBENCH_LEMONADE_QWEN3_6_35B_GUIDE.md` for bounded smoke, scored, and full-run profiles.
+`doc/PINCHBENCH_LEMONADE_QWEN3_6_35B_GUIDE.md` for bounded smoke, scored, and full-run profiles.
 
 ## Results
 
