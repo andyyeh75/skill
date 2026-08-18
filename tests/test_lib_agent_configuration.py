@@ -46,9 +46,13 @@ class CustomEndpointAgentConfigurationTests(unittest.TestCase):
             create_result = subprocess.CompletedProcess(
                 ["openclaw", "agents", "add"], 0, stdout="", stderr=""
             )
+            auth_result = subprocess.CompletedProcess(
+                ["openclaw", "models", "auth", "paste-api-key"], 0, stdout="", stderr=""
+            )
 
             with patch(
-                "lib_agent.subprocess.run", side_effect=[list_result, create_result]
+                "lib_agent.subprocess.run",
+                side_effect=[list_result, create_result, auth_result],
             ) as run, patch(
                 "lib_agent._get_agent_store_dir", return_value=agent_store
             ), patch("lib_agent.Path.home", return_value=home):
@@ -63,14 +67,29 @@ class CustomEndpointAgentConfigurationTests(unittest.TestCase):
             models = json.loads((agent_store / "agent" / "models.json").read_text("utf-8"))
 
         self.assertTrue(created)
-        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_count, 3)
         self.assertEqual(models["defaultProvider"], "llama-cpp")
         self.assertEqual(models["defaultModel"], "qwen3.6-35b-a3b-mtp")
-        provider = models["models"]["providers"]["llama-cpp"]
+        provider = models["providers"]["llama-cpp"]
         self.assertEqual(provider["baseUrl"], "http://127.0.0.1:8088/v1")
         self.assertEqual(provider["apiKey"], "local-key")
         self.assertEqual(provider["models"][0]["id"], "qwen3.6-35b-a3b-mtp")
         self.assertEqual(provider["models"][0]["name"], "llama-cpp/qwen3.6-35b-a3b-mtp")
+        auth_call = run.call_args_list[2]
+        self.assertEqual(
+            auth_call.args[0],
+            [
+                "openclaw",
+                "models",
+                "--agent",
+                "bench-custom",
+                "auth",
+                "paste-api-key",
+                "--provider",
+                "llama-cpp",
+            ],
+        )
+        self.assertEqual(auth_call.kwargs["input"], "local-key\n")
 
 
 class CustomEndpointExecutionTests(unittest.TestCase):
@@ -97,6 +116,56 @@ class CustomEndpointExecutionTests(unittest.TestCase):
 
         command = run.call_args.args[0]
         self.assertEqual(command[:3], ["openclaw", "agent", "--local"])
+
+    def test_wall_clock_budget_exhausted_during_setup_skips_agent_process(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            with patch("lib_agent.cleanup_agent_sessions"), patch(
+                "lib_agent.is_fws_task", return_value=False
+            ), patch("lib_agent.prepare_task_workspace", return_value=workspace), patch(
+                "lib_agent.subprocess.run"
+            ) as run, patch("lib_agent._load_transcript", return_value=([], None)), patch(
+                "lib_agent.time.time", side_effect=[0.0, 0.0, 11.0, 11.0]
+            ):
+                result = execute_openclaw_task(
+                    task=_task(),
+                    agent_id="bench-custom",
+                    model_id="llama-cpp/qwen3.6-35b-a3b-mtp",
+                    run_id="run-1",
+                    timeout_multiplier=1.0,
+                    task_wall_clock_seconds=10.0,
+                    skill_dir=ROOT,
+                )
+
+        run.assert_not_called()
+        self.assertTrue(result["timed_out"])
+        self.assertTrue(result["hard_timeout_exceeded"])
+        self.assertEqual(result["hard_timeout_limit_seconds"], 10.0)
+
+    def test_single_session_uses_remaining_wall_clock_budget(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            completed = subprocess.CompletedProcess(
+                ["openclaw", "agent"], 0, stdout="done", stderr=""
+            )
+            with patch("lib_agent.cleanup_agent_sessions"), patch(
+                "lib_agent.is_fws_task", return_value=False
+            ), patch("lib_agent.prepare_task_workspace", return_value=workspace), patch(
+                "lib_agent.subprocess.run", return_value=completed
+            ) as run, patch("lib_agent._load_transcript", return_value=([], None)), patch(
+                "lib_agent.time.time", side_effect=[0.0, 0.0, 3.0, 4.0]
+            ):
+                execute_openclaw_task(
+                    task=_task(),
+                    agent_id="bench-custom",
+                    model_id="llama-cpp/qwen3.6-35b-a3b-mtp",
+                    run_id="run-1",
+                    timeout_multiplier=1.0,
+                    task_wall_clock_seconds=10.0,
+                    skill_dir=ROOT,
+                )
+
+        self.assertEqual(run.call_args.kwargs["timeout"], 7.0)
 
 
 if __name__ == "__main__":

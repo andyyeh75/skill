@@ -895,17 +895,17 @@ def execute_openclaw_task(
         if not fws_available():
             logger.warning("⚠️ Task %s requires fws but it's not installed (npm install -g @juppytt/fws)", task.task_id)
         else:
-            fws_env = start_fws()
+            fws_env = start_fws(task.frontmatter.get("prerequisites", []))
 
     # Use --local for fws tasks so env vars propagate to the agent. Custom
     # endpoints should also run embedded: they are local/private by design and
     # must not depend on a separately running OpenClaw gateway.
     use_local = fws_env is not None or local_mode
 
+    # Start the task budget before preparing its workspace. Setup is part of
+    # the reported execution time and must not let a hard wall-clock ceiling
+    # grant the agent additional subprocess runtime.
     start_time = time.time()
-    workspace = prepare_task_workspace(skill_dir, run_id, task, agent_id)
-    protected_bootstrap = _snapshot_bootstrap_files(workspace)
-    session_id = f"{task.task_id}_{int(time.time() * 1000)}"
     configured_timeout_seconds = task.timeout_seconds * timeout_multiplier
     timeout_seconds = configured_timeout_seconds
     hard_timeout_limit_seconds: Optional[float] = None
@@ -915,6 +915,10 @@ def execute_openclaw_task(
         timeout_seconds = min(timeout_seconds, task_wall_clock_seconds)
         if task_wall_clock_seconds <= configured_timeout_seconds:
             hard_timeout_limit_seconds = task_wall_clock_seconds
+
+    workspace = prepare_task_workspace(skill_dir, run_id, task, agent_id)
+    protected_bootstrap = _snapshot_bootstrap_files(workspace)
+    session_id = f"{task.task_id}_{int(time.time() * 1000)}"
     stdout = ""
     stderr = ""
     exit_code = -1
@@ -1008,44 +1012,50 @@ def execute_openclaw_task(
                 break
     else:
         # Single-session task: send task.prompt once
-        try:
-            cmd = [
-                    "openclaw",
-                    "agent",
-                    "--agent",
-                    agent_id,
-                    "--model",
-                    model_id,
-                    "--session-id",
-                    session_id,
-                    "--message",
-                    task.prompt,
-                ]
-            if use_local:
-                cmd.insert(2, "--local")
-            if thinking_level:
-                cmd.extend(["--thinking", thinking_level])
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                cwd=str(workspace),
-                timeout=timeout_seconds,
-                check=False,
-                shell=USE_SHELL,
-            )
-            _restore_bootstrap_files(workspace, protected_bootstrap)
-            stdout = result.stdout
-            stderr = result.stderr
-            exit_code = result.returncode
-        except subprocess.TimeoutExpired as exc:
+        remaining = timeout_seconds - (time.time() - start_time)
+        if remaining <= 0:
             timed_out = True
-            stdout = _coerce_subprocess_output(exc.stdout)
-            stderr = _coerce_subprocess_output(exc.stderr)
+            stderr = "Task timeout exhausted during workspace preparation"
             _restore_bootstrap_files(workspace, protected_bootstrap)
-        except FileNotFoundError as exc:
-            stderr = f"openclaw command not found: {exc}"
-            _restore_bootstrap_files(workspace, protected_bootstrap)
+        else:
+            try:
+                cmd = [
+                        "openclaw",
+                        "agent",
+                        "--agent",
+                        agent_id,
+                        "--model",
+                        model_id,
+                        "--session-id",
+                        session_id,
+                        "--message",
+                        task.prompt,
+                    ]
+                if use_local:
+                    cmd.insert(2, "--local")
+                if thinking_level:
+                    cmd.extend(["--thinking", thinking_level])
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    cwd=str(workspace),
+                    timeout=remaining,
+                    check=False,
+                    shell=USE_SHELL,
+                )
+                _restore_bootstrap_files(workspace, protected_bootstrap)
+                stdout = result.stdout
+                stderr = result.stderr
+                exit_code = result.returncode
+            except subprocess.TimeoutExpired as exc:
+                timed_out = True
+                stdout = _coerce_subprocess_output(exc.stdout)
+                stderr = _coerce_subprocess_output(exc.stderr)
+                _restore_bootstrap_files(workspace, protected_bootstrap)
+            except FileNotFoundError as exc:
+                stderr = f"openclaw command not found: {exc}"
+                _restore_bootstrap_files(workspace, protected_bootstrap)
 
     # For multi-session tasks that used new_session, the final transcript only
     # contains the last session's conversation.  Merge archived session
