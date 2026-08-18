@@ -64,6 +64,9 @@ dmypy.json
 uv.lock
 results/
 .pinchbench/
+models/
+outputs/
+exports/
 
 # Vultr deployment
 deploy/
