@@ -19,6 +19,9 @@ PinchBench measures how well LLM models perform as the brain of an OpenClaw agen
 - A running OpenClaw instance
 - API credentials for the tested model provider
 - Optional: a local or remote Ollama server for private LLM judging
+- For `--judge copilot` or `--judge copilot:<model>`: the standalone GitHub
+  Copilot CLI, authenticated persistently with `copilot login`, and access to
+  the requested Copilot model.
 
 ## Quick Start
 
@@ -145,6 +148,41 @@ Supported direct judge prefixes:
 - `openai/<model>` using `OPENAI_API_KEY`
 - `ollama/<model>` using native Ollama chat
 - `claude` or `claude:<model>` using headless Claude CLI
+- `copilot` or `copilot:<model>` using the authenticated GitHub Copilot CLI
+
+### Copilot Judge Preflight
+
+The SYCL Qwen benchmark launcher validates Copilot before it starts the model
+server. For a non-sanity suite using a Copilot judge, it sends a minimal,
+no-tool `Reply with exactly: OK` request to the selected model. This confirms
+the locally persisted credential and current model access; it cannot guarantee
+that a credential will remain valid after the preflight (for example, if it is
+revoked or expires during a long run).
+
+The launcher writes the outcome to `copilot_preflight.log` in the run directory
+and refuses to start if the check fails. Its settings are:
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `PINCHBENCH_COPILOT_PREFLIGHT` | `1` | Set to `0` only to explicitly skip the live Copilot check. |
+| `PINCHBENCH_COPILOT_PREFLIGHT_TIMEOUT` | `90` | Maximum duration, in seconds, for the preflight request. |
+| `PINCHBENCH_COPILOT_BIN` | `copilot` | Path or command name of the Copilot CLI. |
+
+### SYCL Runtime and Scoring Limits
+
+The Intel SYCL Qwen launcher checks the configured RAM KV cache; the standard
+profile uses 8 GiB (`LLAMA_SYCL_CACHE_RAM_MIB=8192`). A task may execute for up
+to 10 minutes, independently of `--timeout-multiplier`; only a task that
+reaches that 10-minute limit receives a score of `0.0`:
+
+| Variable | Default | Meaning |
+| --- | ---: | --- |
+| `PINCHBENCH_TASK_WALL_CLOCK_SECONDS` | `600` | Hard execution stop (10 minutes). |
+| `PINCHBENCH_SCORE_ZERO_AFTER_SECONDS` | `600` | A task that reaches 10 minutes receives a final score of `0.0`. |
+
+The result JSON retains elapsed time and timeout metadata so the final report
+can distinguish an execution cutoff from a score zero caused by the
+10-minute limit.
 
 ## Command Line Options
 

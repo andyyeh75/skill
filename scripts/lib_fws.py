@@ -22,6 +22,7 @@ MOCK_GWS_ENV_KEYS = [
     "HTTPS_PROXY",
     "SSL_CERT_FILE",
 ]
+LOCAL_BYPASS_ENV_KEYS = ["NO_PROXY", "no_proxy"]
 
 
 def is_fws_task(frontmatter: dict) -> bool:
@@ -81,6 +82,17 @@ def start_fws() -> dict:
             "SSL_CERT_FILE": f"{home}/.local/share/fws/certs/ca.crt",
         }
 
+    # gws reads its FWS-rewritten discovery documents over plain HTTP on
+    # localhost.  Keep that traffic out of a host-level corporate proxy;
+    # otherwise the discovery probe can receive the proxy's 403 page instead
+    # of the mock Gmail response.
+    bypass_hosts = "127.0.0.1,localhost,::1"
+    existing_no_proxy = os.environ.get("NO_PROXY", "")
+    if existing_no_proxy:
+        bypass_hosts = f"{bypass_hosts},{existing_no_proxy}"
+    env_vars["NO_PROXY"] = bypass_hosts
+    env_vars["no_proxy"] = bypass_hosts
+
     # Save original values and set new ones
     original_env = {}
     for key, value in env_vars.items():
@@ -88,6 +100,33 @@ def start_fws() -> dict:
         os.environ[key] = value
 
     logger.info("✅ fws server started, env configured")
+
+    # This is a read-only deployment gate.  It confirms both services used by
+    # the final integration cohort are reachable through the same CLIs the
+    # task agent will use.  Do this after the environment is installed so the
+    # gws discovery cache and gh HTTPS proxy are exercised, not merely the
+    # server's listening socket.
+    checks = (
+        ("GitHub", ["gh", "issue", "list", "--repo", "testuser/my-project", "--state", "open", "--limit", "1"]),
+        ("GWS Gmail", ["gws", "gmail", "users", "messages", "list", "--params", '{"userId":"me","q":"is:unread"}']),
+        ("GWS Tasks", ["gws", "tasks", "tasklists", "list"]),
+    )
+    failures = []
+    for service, command in checks:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip().replace("\n", " ")
+            failures.append(f"{service}: {detail[:240]}")
+    if failures:
+        stop_fws(original_env)
+        raise RuntimeError("FWS integration preflight failed; refusing to run integration task: " + "; ".join(failures))
+    logger.info("✅ FWS GitHub and GWS integration preflight passed")
     return original_env
 
 

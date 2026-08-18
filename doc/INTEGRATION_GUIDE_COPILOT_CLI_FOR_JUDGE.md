@@ -78,6 +78,28 @@ The CLI requires `--allow-all-tools` for non-interactive execution. The empty `-
 
 If the command reports "You have exceeded your monthly quota", authentication is working but the account does not currently have usable Copilot allowance. Wait for quota renewal or select a model/plan with available allowance; adding an API_KEY does not extend the Copilot subscription quota.
 
+### Optional reusable preflight
+
+Use the repository helper to validate the Copilot judge before launching any benchmark backend. It checks the local CLI, persisted credentials, and access to the requested model, but does not start the subject-agent backend or run any task. It is therefore suitable for Lemonade, llama.cpp, SYCL, and other backend wrappers alike.
+
+```bash
+# Default 90-second timeout; validates Copilot's configured/default model.
+./scripts/check_copilot_judge.sh copilot
+
+# Validate a pinned model and retain the result with the run artifacts.
+./scripts/check_copilot_judge.sh copilot:gpt-5.6-sol \
+  results/my_run/copilot_preflight.log
+```
+
+The helper uses the same restricted, non-interactive Copilot invocation as PinchBench and succeeds only when the CLI returns exactly `OK`. Configure it with these optional environment variables:
+
+| Variable | Default | Purpose |
+|---|---:|---|
+| `PINCHBENCH_COPILOT_BIN` | `copilot` | Path or command name for the Copilot CLI. |
+| `PINCHBENCH_COPILOT_PREFLIGHT_TIMEOUT` | `90` | Positive timeout in seconds for the preflight request. |
+
+Backend launchers may enable this check before costly model/server startup. For example, the SYCL launcher enables it for Copilot-judged non-sanity suites by default; set `PINCHBENCH_COPILOT_PREFLIGHT=0` only when a deliberate external preflight has already been performed. The check is not needed for `--no-judge` runs or non-Copilot judges.
+
 ## Running PinchBench
 
 ### One-task smoke test
