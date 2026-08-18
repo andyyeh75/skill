@@ -338,8 +338,11 @@ def ensure_agent_exists(
             provider_id = "custom"
             provider_model_id = model_id
 
-        providers = data.setdefault("models", {}).setdefault("providers", {})
-        data["models"]["mode"] = "merge"
+        # Per-agent ``models.json`` is a provider fragment. OpenClaw resolves
+        # providers from its root ``providers`` key; placing a provider under
+        # ``models.providers`` leaves the agent's declared model visible but
+        # makes runtime silently fall back to the default provider.
+        providers = data.setdefault("providers", {})
         providers[provider_id] = {
             "baseUrl": base_url,
             "apiKey": key_ref,
@@ -358,6 +361,44 @@ def ensure_agent_exists(
         data["defaultProvider"] = provider_id
         data["defaultModel"] = provider_model_id
         bench_models.write_text(json.dumps(data, indent=2, ensure_ascii=False), "utf-8")
+
+        # OpenClaw 2026.6 keeps runtime credentials in each isolated agent's
+        # auth store.  ``models.json`` documents the endpoint and can contain
+        # an apiKey marker, but that marker alone is not a usable credential
+        # for a newly-created custom provider.  Register the local endpoint
+        # key in the bench agent's store as well, otherwise OpenClaw exhausts
+        # its fallback chain before making any HTTP request.
+        if api_key:
+            try:
+                auth_result = subprocess.run(
+                    [
+                        "openclaw",
+                        "models",
+                        "--agent",
+                        agent_id,
+                        "auth",
+                        "paste-api-key",
+                        "--provider",
+                        provider_id,
+                    ],
+                    input=f"{api_key}\n",
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    shell=USE_SHELL,
+                )
+                if auth_result.returncode != 0:
+                    logger.warning(
+                        "Failed to register local auth for provider %s on agent %s: %s",
+                        provider_id,
+                        agent_id,
+                        auth_result.stderr.strip(),
+                    )
+            except FileNotFoundError:
+                logger.warning(
+                    "openclaw CLI not found while registering local auth for agent %s",
+                    agent_id,
+                )
         logger.info(
             "Configured %s provider (%s) with model %s for agent %s "
             "(contextWindow=%s, maxTokens=%s)",
@@ -828,6 +869,7 @@ def execute_openclaw_task(
     run_id: str,
     timeout_multiplier: float,
     skill_dir: Path,
+    task_wall_clock_seconds: Optional[float] = None,
     output_dir: Optional[Path] = None,
     verbose: bool = False,
     thinking_level: Optional[str] = None,
@@ -864,7 +906,15 @@ def execute_openclaw_task(
     workspace = prepare_task_workspace(skill_dir, run_id, task, agent_id)
     protected_bootstrap = _snapshot_bootstrap_files(workspace)
     session_id = f"{task.task_id}_{int(time.time() * 1000)}"
-    timeout_seconds = task.timeout_seconds * timeout_multiplier
+    configured_timeout_seconds = task.timeout_seconds * timeout_multiplier
+    timeout_seconds = configured_timeout_seconds
+    hard_timeout_limit_seconds: Optional[float] = None
+    if task_wall_clock_seconds is not None:
+        if task_wall_clock_seconds <= 0:
+            raise ValueError("task_wall_clock_seconds must be positive when set")
+        timeout_seconds = min(timeout_seconds, task_wall_clock_seconds)
+        if task_wall_clock_seconds <= configured_timeout_seconds:
+            hard_timeout_limit_seconds = task_wall_clock_seconds
     stdout = ""
     stderr = ""
     exit_code = -1
@@ -920,6 +970,8 @@ def execute_openclaw_task(
                         "agent",
                         "--agent",
                         agent_id,
+                        "--model",
+                        model_id,
                         "--session-id",
                         current_session_id,
                         "--message",
@@ -962,6 +1014,8 @@ def execute_openclaw_task(
                     "agent",
                     "--agent",
                     agent_id,
+                    "--model",
+                    model_id,
                     "--session-id",
                     session_id,
                     "--message",
@@ -1031,6 +1085,7 @@ def execute_openclaw_task(
         transcript, transcript_path = _load_transcript(agent_id, session_id, start_time)
     usage = _extract_usage_from_transcript(transcript)
     execution_time = time.time() - start_time
+    hard_timeout_exceeded = bool(timed_out and hard_timeout_limit_seconds is not None)
 
     # Archive the raw transcript JSONL before cleanup_agent_sessions deletes it
     if transcript_path and output_dir:
@@ -1102,6 +1157,8 @@ def execute_openclaw_task(
         "workspace": str(workspace),
         "exit_code": exit_code,
         "timed_out": timed_out,
+        "hard_timeout_limit_seconds": hard_timeout_limit_seconds,
+        "hard_timeout_exceeded": hard_timeout_exceeded,
         "execution_time": execution_time,
         "stdout": stdout,
         "stderr": stderr,

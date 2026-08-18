@@ -194,7 +194,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--suite",
         default="all",
-        help='Tasks to run: "all", "automated-only", a category name (e.g. "coding"), or comma-separated task IDs',
+        help='Tasks to run: "all", "automated-only", a category name (e.g. "coding"), comma-separated task IDs, or a 1-based task ordinal (e.g. "3")',
     )
     parser.add_argument(
         "--core",
@@ -227,6 +227,20 @@ def _parse_args() -> argparse.Namespace:
         type=float,
         default=1.0,
         help="Scale all task timeouts",
+    )
+    parser.add_argument(
+        "--task-wall-clock-seconds",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="Hard per-task execution ceiling; default: disabled",
+    )
+    parser.add_argument(
+        "--score-zero-after-seconds",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="Force a task score to 0 when execution exceeds this duration; default: disabled",
     )
     parser.add_argument(
         "--runs",
@@ -322,6 +336,10 @@ def _parse_args() -> argparse.Namespace:
     # Validate --trend-window
     if args.trend_window < 2:
         parser.error("--trend-window must be >= 2")
+    if args.task_wall_clock_seconds is not None and args.task_wall_clock_seconds <= 0:
+        parser.error("--task-wall-clock-seconds must be positive")
+    if args.score_zero_after_seconds is not None and args.score_zero_after_seconds <= 0:
+        parser.error("--score-zero-after-seconds must be positive")
 
     # Validate --thinking
     if args.thinking and args.thinking not in VALID_THINKING_LEVELS:
@@ -354,8 +372,18 @@ def _select_task_ids(
                 task.task_id for task in tasks if category_map.get(task.task_id) in requested_set
             ]
 
-    # Fall back to comma-separated task IDs
-    return [task_id.strip() for task_id in suite.split(",") if task_id.strip()]
+    selected_ids = []
+    for selector in (item.strip() for item in suite.split(",")):
+        if not selector:
+            continue
+        if selector.isdecimal():
+            ordinal = int(selector)
+            if ordinal < 1 or ordinal > len(tasks):
+                raise ValueError(f"Task ordinal {ordinal} is outside 1..{len(tasks)}")
+            selected_ids.append(tasks[ordinal - 1].task_id)
+        else:
+            selected_ids.append(selector)
+    return selected_ids
 
 
 def _next_run_id(run_root: Path) -> str:
@@ -859,7 +887,24 @@ def main():
     run_root = Path("/tmp/pinchbench")
     run_id = _next_run_id(run_root)
     skill_dir = skill_root
-    agent_id = f"bench-{model_slug}"
+    # A model-only agent id makes concurrent benchmark runs share OpenClaw's
+    # session store.  That can attach a response from one task to another
+    # task's transcript.  Let launchers provide an isolated, stable suffix.
+    agent_suffix = re.sub(
+        r"[^a-z0-9-]+",
+        "-",
+        os.environ.get("PINCHBENCH_AGENT_ID_SUFFIX", "").strip().lower(),
+    ).strip("-")[:40]
+    # OpenClaw stores an agent id in a 64-character field.  Preserve the
+    # unique suffix in full and shorten the human-readable model component
+    # instead, otherwise different runs can collide after OpenClaw truncates.
+    if agent_suffix:
+        agent_id_max_len = 64
+        model_budget = agent_id_max_len - len("bench-") - len("-") - len(agent_suffix)
+        agent_id = f"bench-{model_slug[:max(1, model_budget)].rstrip('-')}-{agent_suffix}"
+    else:
+        agent_id = f"bench-{model_slug}"
+    logger.info("Using OpenClaw agent id: %s", agent_id)
     # Use a shared workspace for the agent - we'll copy fixtures per task
     agent_workspace = Path(f"/tmp/pinchbench/{run_id}/agent_workspace")
 
@@ -913,6 +958,28 @@ def main():
 
     runs_per_task = max(1, args.runs)
 
+    def _exceeded_score_cutoff(result: Dict[str, Any]) -> bool:
+        """Apply the explicit score cutoff, including a hard execution stop."""
+        if args.score_zero_after_seconds is None:
+            return False
+        return bool(result.get("hard_timeout_exceeded")) or float(
+            result.get("execution_time", 0.0) or 0.0
+        ) >= args.score_zero_after_seconds
+
+    def _score_cutoff_grade(task: Task, result: Dict[str, Any]) -> GradeResult:
+        elapsed = float(result.get("execution_time", 0.0) or 0.0)
+        return GradeResult(
+            task_id=task.task_id,
+            score=0.0,
+            max_score=1.0,
+            grading_type=task.grading_type,
+            breakdown={},
+            notes=(
+                f"Execution reached the {args.score_zero_after_seconds:g}s scoring cutoff "
+                f"({elapsed:.1f}s); score forced to 0.0."
+            ),
+        )
+
     # Incremental result writer: builds partial result JSON from completed
     # tasks so external tools can poll progress while the benchmark runs.
     incremental_dir = Path(args.output_dir)
@@ -930,6 +997,8 @@ def main():
             "status": r["status"],
             "timed_out": r["timed_out"],
             "execution_time": r["execution_time"],
+            "hard_timeout_limit_seconds": r.get("hard_timeout_limit_seconds"),
+            "hard_timeout_exceeded": r.get("hard_timeout_exceeded", False),
             "transcript_length": len(r["transcript"]),
             "usage": r.get("usage", {}),
             "workspace": r["workspace"],
@@ -1085,6 +1154,7 @@ def main():
                     run_id=f"{run_id}-{run_index + 1}",
                     timeout_multiplier=args.timeout_multiplier,
                     skill_dir=skill_dir,
+                    task_wall_clock_seconds=args.task_wall_clock_seconds,
                     output_dir=Path(args.output_dir) / f"{run_id}_transcripts",
                     verbose=args.verbose,
                     thinking_level=args.thinking,
@@ -1109,6 +1179,14 @@ def main():
 
             task_results.append(result)
             results.append(result)
+            score_cutoff_exceeded = _exceeded_score_cutoff(result)
+            if score_cutoff_exceeded:
+                logger.warning(
+                    "⏱️ Task %s exceeded the %.0fs scoring cutoff (%.1fs); forcing score to 0.0.",
+                    task.task_id,
+                    args.score_zero_after_seconds,
+                    float(result.get("execution_time", 0.0) or 0.0),
+                )
 
             # Build grade kwargs for this run
             grade_kwargs = dict(
@@ -1126,6 +1204,7 @@ def main():
                 and judge_executor is not None
                 and runs_per_task == 1
                 and not is_last_task
+                and not score_cutoff_exceeded
             )
 
             if can_parallelize:
@@ -1147,7 +1226,9 @@ def main():
                 continue
             else:
                 # Synchronous grading
-                if args.no_judge:
+                if score_cutoff_exceeded:
+                    grade = _score_cutoff_grade(task, result)
+                elif args.no_judge:
                     grade = GradeResult(
                         task_id=task.task_id,
                         score=0.0,
