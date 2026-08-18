@@ -396,6 +396,26 @@ def _next_run_id(run_root: Path) -> str:
     return f"{next_id:04d}"
 
 
+def _build_agent_id(model_slug: str, run_id: str, configured_suffix: str) -> str:
+    """Build a run-isolated OpenClaw agent ID within its 64-character limit."""
+    raw_suffix = configured_suffix.strip() or f"{run_id}-{os.getpid()}"
+    agent_suffix = re.sub(r"[^a-z0-9-]+", "-", raw_suffix.lower()).strip("-")[:40]
+    agent_id_max_len = 64
+    model_budget = agent_id_max_len - len("bench-") - len("-") - len(agent_suffix)
+    return f"bench-{model_slug[:max(1, model_budget)].rstrip('-')}-{agent_suffix}"
+
+
+def _exceeded_score_cutoff(
+    result: Dict[str, Any], score_zero_after_seconds: Optional[float]
+) -> bool:
+    """Return whether a task must bypass grading and receive a zero score."""
+    if score_zero_after_seconds is None:
+        return False
+    return bool(result.get("hard_timeout_exceeded")) or float(
+        result.get("execution_time", 0.0) or 0.0
+    ) >= score_zero_after_seconds
+
+
 def _load_ascii_art(script_dir: Path, filename: str) -> str | None:
     """Load ASCII art from a local file if available."""
     art_path = script_dir / filename
@@ -888,22 +908,14 @@ def main():
     run_id = _next_run_id(run_root)
     skill_dir = skill_root
     # A model-only agent id makes concurrent benchmark runs share OpenClaw's
-    # session store.  That can attach a response from one task to another
-    # task's transcript.  Let launchers provide an isolated, stable suffix.
-    agent_suffix = re.sub(
-        r"[^a-z0-9-]+",
-        "-",
-        os.environ.get("PINCHBENCH_AGENT_ID_SUFFIX", "").strip().lower(),
-    ).strip("-")[:40]
-    # OpenClaw stores an agent id in a 64-character field.  Preserve the
-    # unique suffix in full and shorten the human-readable model component
-    # instead, otherwise different runs can collide after OpenClaw truncates.
-    if agent_suffix:
-        agent_id_max_len = 64
-        model_budget = agent_id_max_len - len("bench-") - len("-") - len(agent_suffix)
-        agent_id = f"bench-{model_slug[:max(1, model_budget)].rstrip('-')}-{agent_suffix}"
-    else:
-        agent_id = f"bench-{model_slug}"
+    # session store. That can attach a response from one task to another
+    # task's transcript. The generated run ID plus PID isolates direct
+    # invocations too; launchers may supply a stable suffix when desired.
+    agent_id = _build_agent_id(
+        model_slug,
+        run_id,
+        os.environ.get("PINCHBENCH_AGENT_ID_SUFFIX", ""),
+    )
     logger.info("Using OpenClaw agent id: %s", agent_id)
     # Use a shared workspace for the agent - we'll copy fixtures per task
     agent_workspace = Path(f"/tmp/pinchbench/{run_id}/agent_workspace")
@@ -957,14 +969,6 @@ def main():
     axiom.run_start(total_tasks=len(tasks_to_run), suite=args.suite)
 
     runs_per_task = max(1, args.runs)
-
-    def _exceeded_score_cutoff(result: Dict[str, Any]) -> bool:
-        """Apply the explicit score cutoff, including a hard execution stop."""
-        if args.score_zero_after_seconds is None:
-            return False
-        return bool(result.get("hard_timeout_exceeded")) or float(
-            result.get("execution_time", 0.0) or 0.0
-        ) >= args.score_zero_after_seconds
 
     def _score_cutoff_grade(task: Task, result: Dict[str, Any]) -> GradeResult:
         elapsed = float(result.get("execution_time", 0.0) or 0.0)
@@ -1179,7 +1183,9 @@ def main():
 
             task_results.append(result)
             results.append(result)
-            score_cutoff_exceeded = _exceeded_score_cutoff(result)
+            score_cutoff_exceeded = _exceeded_score_cutoff(
+                result, args.score_zero_after_seconds
+            )
             if score_cutoff_exceeded:
                 logger.warning(
                     "⏱️ Task %s exceeded the %.0fs scoring cutoff (%.1fs); forcing score to 0.0.",
