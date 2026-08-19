@@ -91,6 +91,41 @@ class CustomEndpointAgentConfigurationTests(unittest.TestCase):
         )
         self.assertEqual(auth_call.kwargs["input"], "local-key\n")
 
+    def test_custom_provider_auth_registration_failure_aborts_setup(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            list_result = subprocess.CompletedProcess(
+                ["openclaw", "agents", "list"], 0, stdout="", stderr=""
+            )
+            create_result = subprocess.CompletedProcess(
+                ["openclaw", "agents", "add"], 0, stdout="", stderr=""
+            )
+            auth_result = subprocess.CompletedProcess(
+                ["openclaw", "models", "auth", "paste-api-key"],
+                1,
+                stdout="",
+                stderr="credential store is locked",
+            )
+
+            with patch(
+                "lib_agent.subprocess.run",
+                side_effect=[list_result, create_result, auth_result],
+            ), patch(
+                "lib_agent._get_agent_store_dir", return_value=root / "agent-store"
+            ), patch("lib_agent.Path.home", return_value=root / "home"):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "Failed to register local auth for provider llama-cpp on agent "
+                    "bench-custom: credential store is locked",
+                ):
+                    ensure_agent_exists(
+                        "bench-custom",
+                        "llama-cpp/qwen3.6-35b-a3b-mtp",
+                        root / "workspace",
+                        base_url="http://127.0.0.1:8088/v1",
+                        api_key="local-key",
+                    )
+
 
 class CustomEndpointExecutionTests(unittest.TestCase):
     def test_local_mode_adds_local_flag_for_single_session_task(self) -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -18,6 +19,7 @@ from benchmark import (  # noqa: E402
     _compute_efficiency_summary,
     _compute_score_totals,
     _exceeded_score_cutoff,
+    _next_run_id,
 )
 
 
@@ -32,6 +34,16 @@ def _grading(mean: float, max_score: float) -> dict:
 
 
 class BenchmarkScoringTests(unittest.TestCase):
+    def test_next_run_id_reserves_a_unique_workspace_directory(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            run_root = Path(tmp_dir)
+            (run_root / "0001").mkdir()
+
+            run_id = _next_run_id(run_root)
+
+            self.assertEqual(run_id, "0002")
+            self.assertTrue((run_root / run_id).is_dir())
+
     @patch("benchmark.os.getpid", return_value=4242)
     def test_agent_id_defaults_to_run_and_process_suffix(self, _getpid) -> None:
         agent_id = _build_agent_id("test-model", "0017", "")

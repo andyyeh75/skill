@@ -388,11 +388,9 @@ def ensure_agent_exists(
                     shell=USE_SHELL,
                 )
                 if auth_result.returncode != 0:
-                    logger.warning(
-                        "Failed to register local auth for provider %s on agent %s: %s",
-                        provider_id,
-                        agent_id,
-                        auth_result.stderr.strip(),
+                    raise RuntimeError(
+                        f"Failed to register local auth for provider {provider_id} "
+                        f"on agent {agent_id}: {auth_result.stderr.strip()}"
                     )
             except FileNotFoundError:
                 logger.warning(
