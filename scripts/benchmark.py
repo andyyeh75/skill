@@ -387,13 +387,22 @@ def _select_task_ids(
 
 
 def _next_run_id(run_root: Path) -> str:
+    """Allocate and atomically reserve the next numeric run directory."""
     run_root.mkdir(parents=True, exist_ok=True)
     existing = []
     for entry in run_root.iterdir():
         if entry.is_dir() and entry.name.isdigit():
             existing.append(int(entry.name))
     next_id = (max(existing) + 1) if existing else 1
-    return f"{next_id:04d}"
+    while True:
+        run_id = f"{next_id:04d}"
+        try:
+            # mkdir is atomic, so another process that selects the same ID
+            # cannot claim its workspace after this reservation succeeds.
+            (run_root / run_id).mkdir()
+            return run_id
+        except FileExistsError:
+            next_id += 1
 
 
 def _build_agent_id(model_slug: str, run_id: str, configured_suffix: str) -> str:
@@ -1183,7 +1192,7 @@ def main():
 
             task_results.append(result)
             results.append(result)
-            score_cutoff_exceeded = _exceeded_score_cutoff(
+            score_cutoff_exceeded = not args.no_judge and _exceeded_score_cutoff(
                 result, args.score_zero_after_seconds
             )
             if score_cutoff_exceeded:
