@@ -109,6 +109,128 @@ class KiloJudgeTests(unittest.TestCase):
         )
 
 
+class GnaiJudgeTests(unittest.TestCase):
+    def test_call_judge_api_gnai_requires_a_key_or_readable_key_file(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"GNAI_API_KEY_FILE": "/definitely/missing/gnai_api_key.rc"},
+            clear=True,
+        ):
+            result = call_judge_api(prompt="grade this", model="gnai/claude-haiku-4.5")
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(
+            result["error"],
+            "GNAI_API_KEY not set and GNAI_API_KEY_FILE could not be read",
+        )
+
+    def test_call_judge_api_gnai_posts_native_anthropic_request(self) -> None:
+        captured_request = None
+
+        def fake_urlopen(req, timeout, context=None):
+            nonlocal captured_request
+            captured_request = req
+            self.assertEqual(timeout, 12.5)
+            self.assertIsNotNone(context)
+            return _FakeResponse({"content": [{"type": "text", "text": '{"total": 1.0}'}]})
+
+        env = {
+            "GNAI_API_KEY": "test-key",
+            "GNAI_BASE_URL": "https://gnai.example.test",
+            "GNAI_USE_ENV_PROXY": "1",
+        }
+        with patch.dict(os.environ, env, clear=True), patch(
+            "lib_agent.request.urlopen", side_effect=fake_urlopen
+        ):
+            result = call_judge_api(
+                prompt="grade this",
+                model="gnai/claude-haiku-4.5",
+                timeout_seconds=12.5,
+            )
+
+        self.assertEqual(result, {"status": "success", "text": '{"total": 1.0}'})
+        self.assertIsNotNone(captured_request)
+        self.assertEqual(
+            captured_request.full_url,
+            "https://gnai.example.test/providers/anthropic/v1/messages",
+        )
+        self.assertEqual(captured_request.headers["Authorization"], "Bearer test-key")
+        payload = json.loads(captured_request.data.decode("utf-8"))
+        self.assertEqual(payload["model"], "claude-4-5-haiku")
+        self.assertEqual(payload["max_tokens"], 2048)
+        self.assertEqual(payload["messages"], [{"role": "user", "content": "grade this"}])
+
+    def test_call_judge_api_gnai_routes_luna_to_openai_chat_completions(self) -> None:
+        captured_request = None
+
+        def fake_urlopen(req, timeout, context=None):
+            nonlocal captured_request
+            captured_request = req
+            self.assertEqual(timeout, 30)
+            self.assertIsNotNone(context)
+            return _FakeResponse()
+
+        env = {
+            "GNAI_API_KEY": "test-key",
+            "GNAI_BASE_URL": "https://gnai.example.test",
+            "GNAI_USE_ENV_PROXY": "1",
+        }
+        with patch.dict(os.environ, env, clear=True), patch(
+            "lib_agent.request.urlopen", side_effect=fake_urlopen
+        ):
+            result = call_judge_api(
+                prompt="grade this", model="gnai/gpt-5.6-luna", timeout_seconds=30
+            )
+
+        self.assertEqual(result, {"status": "success", "text": '{"total": 1.0}'})
+        self.assertIsNotNone(captured_request)
+        self.assertEqual(
+            captured_request.full_url,
+            "https://gnai.example.test/providers/openai/v1/chat/completions",
+        )
+        payload = json.loads(captured_request.data.decode("utf-8"))
+        self.assertEqual(payload["model"], "gpt-5.6-luna")
+        self.assertEqual(payload["max_completion_tokens"], 2048)
+        self.assertNotIn("temperature", payload)
+
+    def test_call_judge_api_gnai_routes_grok_and_deepseek_to_openai_chat_completions(self) -> None:
+        captured_requests = []
+
+        def fake_urlopen(req, timeout, context=None):
+            captured_requests.append(req)
+            self.assertEqual(timeout, 30)
+            self.assertIsNotNone(context)
+            return _FakeResponse()
+
+        env = {
+            "GNAI_API_KEY": "test-key",
+            "GNAI_BASE_URL": "https://gnai.example.test",
+            "GNAI_USE_ENV_PROXY": "1",
+        }
+        with patch.dict(os.environ, env, clear=True), patch(
+            "lib_agent.request.urlopen", side_effect=fake_urlopen
+        ):
+            for model in ("grok-4.6", "deepseek-v4-flash"):
+                with self.subTest(model=model):
+                    result = call_judge_api(
+                        prompt="grade this", model=f"gnai/{model}", timeout_seconds=30
+                    )
+                    self.assertEqual(
+                        result, {"status": "success", "text": '{"total": 1.0}'}
+                    )
+
+        self.assertEqual(len(captured_requests), 2)
+        for req, model in zip(captured_requests, ("grok-4.6", "deepseek-v4-flash")):
+            self.assertEqual(
+                req.full_url,
+                "https://gnai.example.test/providers/openai/v1/chat/completions",
+            )
+            payload = json.loads(req.data.decode("utf-8"))
+            self.assertEqual(payload["model"], model)
+            self.assertEqual(payload["max_completion_tokens"], 2048)
+            self.assertNotIn("temperature", payload)
+
+
 class OllamaJudgeTests(unittest.TestCase):
     def test_call_judge_api_ollama_posts_to_native_chat_endpoint_without_auth(self) -> None:
         captured_request = None
