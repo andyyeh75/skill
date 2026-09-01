@@ -52,6 +52,7 @@ Supported direct judge prefixes:
 - `openai/<model>` using `OPENAI_API_KEY`
 - `claude` or `claude:<model>` using headless Claude CLI
 - `copilot` or `copilot:<model>` using the authenticated GitHub Copilot CLI
+- `gnai/<model>` using `GNAI_API_KEY` or `~/gnai_api_key.rc`
 
 ### Copilot Judge Preflight
 
