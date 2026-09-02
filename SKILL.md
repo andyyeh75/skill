@@ -72,6 +72,32 @@ and refuses to start if the check fails. Its settings are:
 | `PINCHBENCH_COPILOT_PREFLIGHT_TIMEOUT` | `90` | Maximum duration, in seconds, for the preflight request. |
 | `PINCHBENCH_COPILOT_BIN` | `copilot` | Path or command name of the Copilot CLI. |
 
+### Proxy propagation for Copilot judges
+
+In this environment, the GitHub Copilot CLI must reach GitHub through the
+corporate proxy.  A preflight that succeeds in an interactive shell does not
+prove that a transient `systemd-run` job or sandbox has inherited those
+variables.  Pass both upper- and lower-case variables to every spawned
+benchmark, recovery, or judge service, and keep local endpoints out of the
+proxy path:
+
+```bash
+systemd-run --user --collect --same-dir \
+  -E HTTP_PROXY=http://proxy-png.intel.com:911 \
+  -E HTTPS_PROXY=http://proxy-png.intel.com:911 \
+  -E http_proxy=http://proxy-png.intel.com:911 \
+  -E https_proxy=http://proxy-png.intel.com:911 \
+  -E NO_PROXY=127.0.0.1,localhost,::1 \
+  -E no_proxy=127.0.0.1,localhost,::1 \
+  <command>
+```
+
+For a non-systemd sandbox, export the same six variables before invoking
+`copilot` or `uv run scripts/benchmark.py`.  This is required for GitHub token
+validation and direct Copilot judging; `NO_PROXY` prevents requests to local
+llama.cpp, Mem0, embedding, and Qdrant endpoints from being sent through the
+proxy.
+
 ### SYCL Runtime and Scoring Limits
 
 The Intel SYCL Qwen launcher checks the configured RAM KV cache; the standard
@@ -87,6 +113,42 @@ reaches that 10-minute limit receives a score of `0.0`:
 The result JSON retains elapsed time and timeout metadata so the final report
 can distinguish an execution cutoff from a score zero caused by the
 10-minute limit.
+
+### OpenClaw SYCL provider stream-idle watchdog
+
+For long local llama.cpp prefills, configure the OpenClaw provider timeout
+separately from PinchBench task cutoffs. The provider stream-idle watchdog
+aborts a model request if no response token arrives before this limit; changing
+`--timeout-multiplier`, an agent `--timeout`, or a systemd service lifetime
+does not raise it.
+
+For the local `sycl` provider, set a 30-minute ceiling in
+`~/.openclaw/openclaw.json`:
+
+```json
+{
+  "models": {
+    "providers": {
+      "sycl": {
+        "timeoutSeconds": 1800
+      }
+    }
+  }
+}
+```
+
+Validate and activate the change before benchmarking:
+
+```bash
+openclaw config validate
+systemctl --user restart openclaw-gateway.service
+openclaw config get models.providers.sycl.timeoutSeconds
+```
+
+Use an OpenClaw agent timeout of at least 1800 seconds for the corresponding
+run. Apply this only to the intended `sycl` provider; do not raise unrelated
+cloud or judge-provider timeouts. Record the setting in the run report because
+an idle-watchdog abort is not a model-quality or TTFT result.
 
 ## Command Line Options
 

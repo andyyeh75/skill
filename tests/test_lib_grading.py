@@ -256,6 +256,58 @@ class WorkspaceFilesForJudgeTests(unittest.TestCase):
         self.assertNotEqual(first_key, second_key)
 
 
+class AutomatedWorkspaceDiscoveryTests(unittest.TestCase):
+    @staticmethod
+    def _task(*, strict_output_paths: bool = False) -> Task:
+        return Task(
+            task_id="nested-artifact",
+            name="Nested artifact discovery",
+            category="test",
+            grading_type="automated",
+            timeout_seconds=30,
+            workspace_files=[],
+            prompt="Create deliverable.txt somewhere in the workspace.",
+            expected_behavior="A deliverable exists in the workspace.",
+            grading_criteria=["Creates deliverable"],
+            automated_checks="""```python
+def grade(transcript, workspace_path):
+    from pathlib import Path
+    return {"file_created": 1.0 if (Path(workspace_path) / "deliverable.txt").exists() else 0.0}
+```""",
+            frontmatter={"strict_output_paths": strict_output_paths},
+        )
+
+    def test_automated_grader_finds_a_unique_nested_artifact(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            artifact_dir = workspace / "artifacts"
+            artifact_dir.mkdir()
+            (artifact_dir / "deliverable.txt").write_text("complete", encoding="utf-8")
+
+            result = grade_task(
+                task=self._task(),
+                execution_result={"status": "success", "transcript": [], "workspace": str(workspace)},
+                skill_dir=ROOT,
+            )
+
+        self.assertEqual(result.score, 1.0)
+
+    def test_strict_output_paths_does_not_flatten_nested_artifacts(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            artifact_dir = workspace / "artifacts"
+            artifact_dir.mkdir()
+            (artifact_dir / "deliverable.txt").write_text("complete", encoding="utf-8")
+
+            result = grade_task(
+                task=self._task(strict_output_paths=True),
+                execution_result={"status": "success", "transcript": [], "workspace": str(workspace)},
+                skill_dir=ROOT,
+            )
+
+        self.assertEqual(result.score, 0.0)
+
+
 class JudgeRetryTests(unittest.TestCase):
     def test_copilot_context_overflow_retries_with_task_evidence_allowlist(self) -> None:
         task = Task(
