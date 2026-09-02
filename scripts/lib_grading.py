@@ -367,8 +367,7 @@ def _grade_llm_judge(
             "   [VERBOSE] Transcript summary for judge (first 1000 chars):\n%s",
             transcript_summary[:1000],
         )
-    workspace_path = execution_result.get("workspace", "")
-    workspace_content = _read_workspace_files(workspace_path)
+    workspace_content = _read_workspace_files(execution_result.get("workspace", ""))
     if verbose and workspace_content:
         logger.info(
             "   [VERBOSE] Workspace files passed to judge (first 500 chars):\n%s",
@@ -402,8 +401,6 @@ def _grade_llm_judge(
         logger.info("   [VERBOSE] Cache MISS for %s (key=%s)", task.task_id, cache_key[:8])
     
     prompt = _build_judge_prompt(task, transcript_summary, rubric, workspace_content)
-    using_reduced_evidence = False
-
     max_judge_attempts = 2
     raw_parsed: Dict[str, Any] = {}
     for attempt in range(max_judge_attempts):
@@ -427,53 +424,6 @@ def _grade_llm_judge(
                     max_judge_attempts,
                     judge_result.get("error", judge_result.get("status")),
                 )
-                if (
-                    not using_reduced_evidence
-                    and _is_copilot_context_limit_error(judge_model, judge_result)
-                ):
-                    workspace_content = _read_workspace_files(
-                        workspace_path,
-                        task_id=task.task_id,
-                        evidence_aware=True,
-                    )
-                    prompt = _build_judge_prompt(
-                        task, transcript_summary, rubric, workspace_content
-                    )
-                    cache_key = _compute_cache_key(
-                        task.task_id,
-                        transcript_summary,
-                        rubric,
-                        judge_model,
-                        workspace_content,
-                    )
-                    using_reduced_evidence = True
-                    if cache_key in _judge_cache:
-                        cached = _judge_cache[cache_key]
-                        get_judge_cache_stats._hits = getattr(
-                            get_judge_cache_stats, "_hits", 0
-                        ) + 1
-                        logger.info(
-                            "Cache HIT for reduced judge evidence for %s (key=%s)",
-                            task.task_id,
-                            cache_key[:8],
-                        )
-                        return GradeResult(
-                            task_id=task.task_id,
-                            score=cached["score"],
-                            max_score=cached["max_score"],
-                            grading_type="llm_judge",
-                            breakdown=cached.get("breakdown", {}),
-                            notes=cached.get("notes", "") + " [cached]",
-                        )
-                    logger.warning(
-                        "Copilot context limit exceeded for %s; retrying with "
-                        "evidence-aware workspace reduction",
-                        task.task_id,
-                    )
-                    continue
-                if judge_result.get("status") == "quota_exceeded":
-                    logger.warning("Judge quota exhausted; not retrying %s", task.task_id)
-                    break
                 if attempt < max_judge_attempts - 1:
                     time.sleep(2**attempt)
                     continue
@@ -676,44 +626,8 @@ def _summarize_transcript(transcript: List[Dict[str, Any]]) -> str:
     return "\n".join(summary_parts)
 
 
-_TASK_WORKSPACE_EVIDENCE_FILES = {
-    # yt-dlp creates large machine-readable metadata and subtitle artifacts for
-    # this task.  The rubric evaluates the cleaned transcript and final summary,
-    # so send only those agent deliverables to the LLM judge.
-    "task_video_transcript_extraction": {
-        "transcript.txt",
-        "video_summary.md",
-    },
-}
-
-_REDUCED_EVIDENCE_MAX_FILE_CHARS = 64_000
-_REDUCED_EVIDENCE_MAX_TOTAL_CHARS = 192_000
-_COPILOT_CONTEXT_LIMIT_RE = re.compile(
-    r"prompt token count(?: of)?\s*[\d,]+\s+exceeds(?: the)? limit(?: of)?\s*[\d,]+",
-    re.IGNORECASE,
-)
-
-
-def _is_copilot_context_limit_error(
-    judge_model: str, judge_result: Dict[str, Any]
-) -> bool:
-    if not (judge_model == "copilot" or judge_model.startswith("copilot:")):
-        return False
-    error_text = str(judge_result.get("error", ""))
-    return bool(_COPILOT_CONTEXT_LIMIT_RE.search(error_text))
-
-
-def _read_workspace_files(
-    workspace_path: str,
-    task_id: str = "",
-    evidence_aware: bool = False,
-) -> str:
-    """Read relevant user-created text files for the LLM judge.
-
-    Most tasks retain the existing all-text-files behavior.  Tasks with large
-    intermediate artifacts may define an explicit evidence allowlist so raw
-    source data does not overwhelm the judge context window.
-    """
+def _read_workspace_files(workspace_path: str) -> str:
+    """Read user-created text files from workspace to provide grading context."""
     if not workspace_path:
         return ""
     workspace = Path(workspace_path)
@@ -729,11 +643,7 @@ def _read_workspace_files(
         "AGENTS.md",
     }
     skip_dirs = {".git", ".openclaw", "__pycache__", "node_modules", "skills"}
-    evidence_files = (
-        _TASK_WORKSPACE_EVIDENCE_FILES.get(task_id) if evidence_aware else None
-    )
     file_contents: List[str] = []
-    total_chars = 0
     for f in sorted(workspace.rglob("*")):
         if not f.is_file():
             continue
@@ -743,34 +653,11 @@ def _read_workspace_files(
             continue
         if f.name in skip_names:
             continue
-        if evidence_files is not None and rel.as_posix() not in evidence_files:
-            continue
         section_header = f"### File: {rel}\n"
-        separator = "\n\n" if file_contents else ""
         try:
             content = f.read_text(encoding="utf-8")
-            if evidence_aware:
-                remaining = (
-                    _REDUCED_EVIDENCE_MAX_TOTAL_CHARS
-                    - total_chars
-                    - len(separator)
-                    - len(section_header)
-                )
-                if remaining <= 0:
-                    break
-                content_limit = min(_REDUCED_EVIDENCE_MAX_FILE_CHARS, remaining)
-                if len(content) > content_limit:
-                    truncation_marker = "\n[Judge evidence truncated to fit Copilot context]"
-                    if content_limit > len(truncation_marker):
-                        content = (
-                            content[: content_limit - len(truncation_marker)]
-                            + truncation_marker
-                        )
-                    else:
-                        content = content[:content_limit]
             section = f"{section_header}{content}"
             file_contents.append(section)
-            total_chars += len(separator) + len(section)
         except (OSError, UnicodeDecodeError):
             pass
     return "\n\n".join(file_contents)

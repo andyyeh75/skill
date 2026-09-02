@@ -135,7 +135,7 @@ cache.
   --model "$MODEL" \
   --base-url "$BASE_URL" \
   --api-key "$API_KEY" \
-  --judge copilot:gpt-5.4-mini \
+  --judge gnai/gpt-5.6-luna \
   --suite automated-only \
   --no-parallel-judge \
   --no-upload \
@@ -157,7 +157,7 @@ export LEMONADE_API_KEY="${OPENAI_API_KEY:-dummy}"
   --model "$MODEL" \
   --base-url "$BASE_URL" \
   --api-key "$API_KEY" \
-  --judge copilot:gpt-5.4-mini \
+  --judge gnai/gpt-5.6-luna \
   --suite automated-only \
   --no-parallel-judge \
   --no-upload
@@ -177,7 +177,7 @@ Run the full suite only after the smoke and scored subset are stable:
   --model "$MODEL" \
   --base-url "$BASE_URL" \
   --api-key "$API_KEY" \
-  --judge copilot:gpt-5.4-mini \
+  --judge gnai/gpt-5.6-luna \
   --suite all \
   --no-parallel-judge \
   --no-upload \
