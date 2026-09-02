@@ -18,9 +18,6 @@ PinchBench measures how well LLM models perform as the brain of an OpenClaw agen
 - [uv](https://docs.astral.sh/uv/) package manager or an initialized `.venv`
 - A running OpenClaw instance
 - API credentials for the tested model provider
-- For `--judge copilot` or `--judge copilot:<model>`: the standalone GitHub
-  Copilot CLI, authenticated persistently with `copilot login`, and access to
-  the requested Copilot model.
 
 ## Quick Start
 
@@ -51,52 +48,7 @@ Supported direct judge prefixes:
 - `anthropic/<model>` using `ANTHROPIC_API_KEY`
 - `openai/<model>` using `OPENAI_API_KEY`
 - `claude` or `claude:<model>` using headless Claude CLI
-- `copilot` or `copilot:<model>` using the authenticated GitHub Copilot CLI
 - `gnai/<model>` using `GNAI_API_KEY` or `~/gnai_api_key.rc`
-
-### Copilot Judge Preflight
-
-The SYCL Qwen benchmark launcher validates Copilot before it starts the model
-server. For a non-sanity suite using a Copilot judge, it sends a minimal,
-no-tool `Reply with exactly: OK` request to the selected model. This confirms
-the locally persisted credential and current model access; it cannot guarantee
-that a credential will remain valid after the preflight (for example, if it is
-revoked or expires during a long run).
-
-The launcher writes the outcome to `copilot_preflight.log` in the run directory
-and refuses to start if the check fails. Its settings are:
-
-| Variable | Default | Description |
-| --- | --- | --- |
-| `PINCHBENCH_COPILOT_PREFLIGHT` | `1` | Set to `0` only to explicitly skip the live Copilot check. |
-| `PINCHBENCH_COPILOT_PREFLIGHT_TIMEOUT` | `90` | Maximum duration, in seconds, for the preflight request. |
-| `PINCHBENCH_COPILOT_BIN` | `copilot` | Path or command name of the Copilot CLI. |
-
-### Proxy propagation for Copilot judges
-
-In this environment, the GitHub Copilot CLI must reach GitHub through the
-corporate proxy.  A preflight that succeeds in an interactive shell does not
-prove that a transient `systemd-run` job or sandbox has inherited those
-variables.  Pass both upper- and lower-case variables to every spawned
-benchmark, recovery, or judge service, and keep local endpoints out of the
-proxy path:
-
-```bash
-systemd-run --user --collect --same-dir \
-  -E HTTP_PROXY=http://proxy-png.intel.com:911 \
-  -E HTTPS_PROXY=http://proxy-png.intel.com:911 \
-  -E http_proxy=http://proxy-png.intel.com:911 \
-  -E https_proxy=http://proxy-png.intel.com:911 \
-  -E NO_PROXY=127.0.0.1,localhost,::1 \
-  -E no_proxy=127.0.0.1,localhost,::1 \
-  <command>
-```
-
-For a non-systemd sandbox, export the same six variables before invoking
-`copilot` or `uv run scripts/benchmark.py`.  This is required for GitHub token
-validation and direct Copilot judging; `NO_PROXY` prevents requests to local
-llama.cpp, Mem0, embedding, and Qdrant endpoints from being sent through the
-proxy.
 
 ### SYCL Runtime and Scoring Limits
 

@@ -134,14 +134,9 @@ By default (no `--judge` flag), the LLM judge runs as an OpenClaw agent session.
 # Headless Claude CLI
 ./scripts/run.sh --model openai/gpt-4o --judge claude
 
-# GitHub Copilot CLI (uses the authenticated Copilot subscription)
-./scripts/run.sh --model openai/gpt-4o --judge copilot:auto
-
-# GitHub Copilot CLI with a specific Copilot model
-./scripts/run.sh --model openai/gpt-4o --judge copilot:gpt-5.4
 ```
 
-Required env vars: `OPENROUTER_API_KEY`, `KILO_API_KEY`, `ANTHROPIC_API_KEY`, or `OPENAI_API_KEY` depending on the judge model prefix. `gnai/<model>` reads the bearer token from `GNAI_API_KEY` first, then `~/gnai_api_key.rc` (override the file with `GNAI_API_KEY_FILE`), and calls the GNAI provider-native API: Anthropic Messages for Claude and OpenAI Chat Completions for OpenAI-family models such as `gnai/gpt-5.6-luna`, `gnai/grok-4.6`, and `gnai/deepseek-v4-flash`. The PinchBench nickname `gnai/claude-haiku-4.5` is mapped to GNAI's canonical `claude-4-5-haiku` model ID. TLS verification is disabled by default for this internal endpoint; set `GNAI_CA_BUNDLE` to a corporate CA bundle to enable verification. For GitHub Copilot judges, install the standalone `copilot` CLI and run `copilot login`; `copilot:auto` asks Copilot to choose an available model, while `copilot:<model>` pins one available to that subscription. For Ollama judges, `OLLAMA_JUDGE_BASE_URL` defaults to `http://localhost:11434`; set it only if your judge endpoint is elsewhere. This keeps `OLLAMA_BASE_URL` free for Ollama-backed agent model configuration. Ollama judges use the native `/api/chat` endpoint and support these optional tuning variables:
+Required env vars: `OPENROUTER_API_KEY`, `KILO_API_KEY`, `ANTHROPIC_API_KEY`, or `OPENAI_API_KEY` depending on the judge model prefix. `gnai/<model>` reads the bearer token from `GNAI_API_KEY` first, then `~/gnai_api_key.rc` (override the file with `GNAI_API_KEY_FILE`), and calls the GNAI provider-native API: Anthropic Messages for Claude and OpenAI Chat Completions for OpenAI-family models such as `gnai/gpt-5.6-luna`, `gnai/grok-4.6`, and `gnai/deepseek-v4-flash`. The PinchBench nickname `gnai/claude-haiku-4.5` is mapped to GNAI's canonical `claude-4-5-haiku` model ID. TLS verification is disabled by default for this internal endpoint; set `GNAI_CA_BUNDLE` to a corporate CA bundle to enable verification. For Ollama judges, `OLLAMA_JUDGE_BASE_URL` defaults to `http://localhost:11434`; set it only if your judge endpoint is elsewhere. This keeps `OLLAMA_BASE_URL` free for Ollama-backed agent model configuration. Ollama judges use the native `/api/chat` endpoint and support these optional tuning variables:
 
 | Variable                    | Description                                                                 |
 | --------------------------- | --------------------------------------------------------------------------- |
