@@ -230,9 +230,9 @@ def ensure_agent_exists(
     deleted and recreated so that the new workspace takes effect.
 
     When *base_url* is provided, a custom OpenAI-compatible provider is
-    configured in the agent's ``models.json`` instead of relying on
-    OpenRouter.  *api_key* defaults to ``${OPENAI_API_KEY}`` (resolved by
-    OpenClaw at runtime) if not given.
+    configured in the agent's ``models.json`` and its root OpenClaw provider
+    URL is synchronized instead of relying on OpenRouter.  *api_key* defaults
+    to ``${OPENAI_API_KEY}`` (resolved by OpenClaw at runtime) if not given.
 
     Returns True if the agent was (re)created.
     """
@@ -339,10 +339,34 @@ def ensure_agent_exists(
             provider_id = "custom"
             provider_model_id = model_id
 
-        # Per-agent ``models.json`` is a provider fragment. OpenClaw resolves
-        # providers from its root ``providers`` key; placing a provider under
-        # ``models.providers`` leaves the agent's declared model visible but
-        # makes runtime silently fall back to the default provider.
+        # OpenClaw's embedded agent runtime resolves the endpoint from the
+        # root ``models.providers`` configuration.  Keep it in sync with the
+        # isolated agent's provider entry, or a stale root URL is used.
+        try:
+            root_config_result = subprocess.run(
+                [
+                    "openclaw",
+                    "config",
+                    "set",
+                    f"models.providers.{provider_id}.baseUrl",
+                    base_url,
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                shell=USE_SHELL,
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                "openclaw CLI not found while synchronizing custom provider "
+                f"{provider_id}"
+            ) from exc
+        if root_config_result.returncode != 0:
+            raise RuntimeError(
+                f"Failed to set root base URL for provider {provider_id}: "
+                f"{root_config_result.stderr.strip()}"
+            )
+
         providers = data.setdefault("providers", {})
         providers[provider_id] = {
             "baseUrl": base_url,
