@@ -9,7 +9,10 @@ import json
 import logging
 import os
 import re
+import tempfile
 import time
+from collections import Counter
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -202,26 +205,30 @@ def _grade_automated(
     transcript = _normalize_transcript_content_blocks(
         execution_result.get("transcript", [])
     )
-    try:
-        scores = grade_func(
-            transcript,
-            workspace_path,
-        )
-    except FileNotFoundError as exc:
-        # Some embedded automated graders assume POSIX shell/temp-path behavior.
-        # On Windows this can surface as WinError 3 even when the agent output is
-        # present.  Keep the normal grader for all platforms, but use a
-        # Windows-safe fallback for the git rescue task so local Windows runs are
-        # comparable to official/Linux runs.
-        if task.task_id == "task_git_rescue_recovery" and os.name == "nt":
-            logger.warning(
-                "Automated grader for %s hit Windows path error; using Windows-safe fallback: %s",
-                task.task_id,
-                exc,
+    strict_output_paths = bool(task.frontmatter.get("strict_output_paths", False))
+    with _automated_workspace_view(
+        workspace_path, strict_output_paths=strict_output_paths
+    ) as grader_workspace_path:
+        try:
+            scores = grade_func(
+                transcript,
+                grader_workspace_path,
             )
-            scores = _grade_git_rescue_recovery_windows_safe(workspace_path)
-        else:
-            raise
+        except FileNotFoundError as exc:
+            # Some embedded automated graders assume POSIX shell/temp-path behavior.
+            # On Windows this can surface as WinError 3 even when the agent output is
+            # present.  Keep the normal grader for all platforms, but use a
+            # Windows-safe fallback for the git rescue task so local Windows runs are
+            # comparable to official/Linux runs.
+            if task.task_id == "task_git_rescue_recovery" and os.name == "nt":
+                logger.warning(
+                    "Automated grader for %s hit Windows path error; using Windows-safe fallback: %s",
+                    task.task_id,
+                    exc,
+                )
+                scores = _grade_git_rescue_recovery_windows_safe(grader_workspace_path)
+            else:
+                raise
 
     if not isinstance(scores, dict):
         scores = {}
@@ -238,6 +245,60 @@ def _grade_automated(
         breakdown=_normalize_score_dict(scores),
         notes="",
     )
+
+
+@contextmanager
+def _automated_workspace_view(
+    workspace_path: str,
+    *,
+    strict_output_paths: bool = False,
+):
+    """Expose uniquely named nested artifacts to legacy root-only graders.
+
+    Most task prompts require an artifact *in the workspace* without requiring
+    it at the workspace root.  Older embedded graders often use
+    ``workspace / \"file.ext\"`` or ``workspace.glob(\"*.ext\")``, which
+    incorrectly rejects a valid artifact created in a subfolder.  The staged
+    view keeps the original top-level tree and adds root-level symlink aliases
+    only for uniquely named files below the root.  Tasks whose directory layout
+    is part of the contract can set ``strict_output_paths: true`` in frontmatter.
+    """
+    workspace = Path(workspace_path) if workspace_path else None
+    if strict_output_paths or not workspace or not workspace.is_dir():
+        yield workspace_path
+        return
+
+    nested_files = [
+        path
+        for path in workspace.rglob("*")
+        if path.is_file() and path.parent != workspace
+    ]
+    if not nested_files:
+        yield workspace_path
+        return
+
+    name_counts = Counter(path.name for path in nested_files)
+    with tempfile.TemporaryDirectory(prefix="pinchbench-grader-") as temp_dir:
+        staged_workspace = Path(temp_dir) / "workspace"
+        try:
+            staged_workspace.mkdir()
+
+            # Preserve the original directory structure without copying large
+            # fixtures. Automated graders are read-only by design.
+            for child in workspace.iterdir():
+                os.symlink(child, staged_workspace / child.name, target_is_directory=child.is_dir())
+
+            for artifact in nested_files:
+                alias = staged_workspace / artifact.name
+                if name_counts[artifact.name] == 1 and not alias.exists():
+                    os.symlink(artifact, alias)
+        except OSError as exc:
+            # Keep benchmark execution functional on platforms that forbid symlinks.
+            logger.debug("Could not stage recursive artifact aliases: %s", exc)
+            yield workspace_path
+            return
+
+        yield str(staged_workspace)
 
 
 _PRIVATE_IMAGE_KEY_FILENAME = "image_classification_answer_key.json"
