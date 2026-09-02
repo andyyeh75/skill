@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import platform
+import ssl
 import stat
 import subprocess
 import time
@@ -229,9 +230,9 @@ def ensure_agent_exists(
     deleted and recreated so that the new workspace takes effect.
 
     When *base_url* is provided, a custom OpenAI-compatible provider is
-    configured in the agent's ``models.json`` instead of relying on
-    OpenRouter.  *api_key* defaults to ``${OPENAI_API_KEY}`` (resolved by
-    OpenClaw at runtime) if not given.
+    configured in the agent's ``models.json`` and its root OpenClaw provider
+    URL is synchronized instead of relying on OpenRouter.  *api_key* defaults
+    to ``${OPENAI_API_KEY}`` (resolved by OpenClaw at runtime) if not given.
 
     Returns True if the agent was (re)created.
     """
@@ -338,10 +339,34 @@ def ensure_agent_exists(
             provider_id = "custom"
             provider_model_id = model_id
 
-        # Per-agent ``models.json`` is a provider fragment. OpenClaw resolves
-        # providers from its root ``providers`` key; placing a provider under
-        # ``models.providers`` leaves the agent's declared model visible but
-        # makes runtime silently fall back to the default provider.
+        # OpenClaw's embedded agent runtime resolves the endpoint from the
+        # root ``models.providers`` configuration.  Keep it in sync with the
+        # isolated agent's provider entry, or a stale root URL is used.
+        try:
+            root_config_result = subprocess.run(
+                [
+                    "openclaw",
+                    "config",
+                    "set",
+                    f"models.providers.{provider_id}.baseUrl",
+                    base_url,
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                shell=USE_SHELL,
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                "openclaw CLI not found while synchronizing custom provider "
+                f"{provider_id}"
+            ) from exc
+        if root_config_result.returncode != 0:
+            raise RuntimeError(
+                f"Failed to set root base URL for provider {provider_id}: "
+                f"{root_config_result.stderr.strip()}"
+            )
+
         providers = data.setdefault("providers", {})
         providers[provider_id] = {
             "baseUrl": base_url,
@@ -1316,21 +1341,27 @@ def call_judge_api(
     Dispatches based on model prefix:
       - openrouter/* -> OpenRouter chat completions API
       - kilo/*       -> Kilo Gateway chat completions API
+      - gnai/*       -> Intel GNAI Anthropic Messages API
       - ollama/*     -> Ollama native chat API
       - lemonade/*   -> Lemonade OpenAI-compatible chat completions API
       - anthropic/*  -> Anthropic Messages API
       - openai/*     -> OpenAI chat completions API
       - claude       -> headless Claude CLI (claude -p)
-      - copilot[:*]  -> GitHub Copilot CLI (subscription-backed)
 
     Returns {"status": str, "text": str, "error"?: str}.
     """
+    if model == "copilot" or model.startswith("copilot:"):
+        return {
+            "status": "error",
+            "text": "",
+            "error": "Copilot judge retired; use gnai/<model>",
+        }
     if model == "claude" or model.startswith("claude:"):
         return _judge_via_claude_cli(prompt, model, timeout_seconds)
-    if model == "copilot" or model.startswith("copilot:"):
-        return _judge_via_copilot_cli(prompt, model, timeout_seconds)
     if model.startswith("kilo/"):
         return _judge_via_kilo(prompt, model, timeout_seconds)
+    if model.startswith("gnai/"):
+        return _judge_via_gnai(prompt, model, timeout_seconds)
     if model.startswith("ollama/"):
         return _judge_via_ollama(prompt, model, timeout_seconds)
     if model.startswith("lemonade/"):
@@ -1420,6 +1451,163 @@ def _judge_via_kilo(prompt: str, model: str, timeout_seconds: float) -> Dict[str
         api_key,
         timeout_seconds,
     )
+
+
+def _gnai_api_key() -> str | None:
+    """Read a GNAI bearer credential without requiring it in the environment."""
+    api_key = os.environ.get("GNAI_API_KEY")
+    if api_key:
+        return api_key.strip()
+
+    key_file = Path(
+        os.environ.get("GNAI_API_KEY_FILE", str(Path.home() / "gnai_api_key.rc"))
+    )
+    try:
+        return key_file.read_text(encoding="utf-8").strip() or None
+    except OSError:
+        return None
+
+
+def _gnai_ssl_context() -> ssl.SSLContext | None:
+    """Return an explicitly configured TLS context for the GNAI service."""
+    ca_bundle = os.environ.get("GNAI_CA_BUNDLE")
+    if ca_bundle:
+        return ssl.create_default_context(cafile=ca_bundle)
+    logger.warning("GNAI TLS certificate verification is disabled for internal use")
+    return ssl._create_unverified_context()
+
+
+def _gnai_open_request(req: request.Request, timeout_seconds: float) -> Any:
+    """Open a GNAI request with the internal TLS and proxy policy."""
+    ssl_context = _gnai_ssl_context()
+    if _env_bool("GNAI_USE_ENV_PROXY", False):
+        return request.urlopen(req, timeout=timeout_seconds, context=ssl_context)
+
+    handlers: List[Any] = [request.ProxyHandler({})]
+    if ssl_context is not None:
+        handlers.append(request.HTTPSHandler(context=ssl_context))
+    return request.build_opener(*handlers).open(req, timeout=timeout_seconds)
+
+
+def _judge_via_gnai(prompt: str, model: str, timeout_seconds: float) -> Dict[str, Any]:
+    """Call an Intel GNAI deployment through its provider-native API."""
+    api_key = _gnai_api_key()
+    if not api_key:
+        return {
+            "status": "error",
+            "text": "",
+            "error": "GNAI_API_KEY not set and GNAI_API_KEY_FILE could not be read",
+        }
+    bare_model = model.removeprefix("gnai/")
+    if not bare_model:
+        return {"status": "error", "text": "", "error": "GNAI model cannot be empty"}
+    # GNAI exposes the canonical model ID with dashes; retain the user-facing
+    # nickname requested for PinchBench commands.
+    api_model = {"claude-haiku-4.5": "claude-4-5-haiku"}.get(bare_model, bare_model)
+    base_url = os.environ.get(
+        "GNAI_BASE_URL", "https://gnai.intel.com/api"
+    ).rstrip("/")
+
+    if not api_model.startswith("claude"):
+        return _judge_via_gnai_openai(
+            prompt, api_model, api_key, base_url, timeout_seconds
+        )
+
+    payload = json.dumps({
+        "model": api_model,
+        "max_tokens": 2048,
+        "temperature": 0.0,
+        "system": _JUDGE_SYSTEM_MSG,
+        "messages": [{"role": "user", "content": prompt}],
+    }).encode("utf-8")
+    req = request.Request(
+        f"{base_url}/providers/anthropic/v1/messages",
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        response = _gnai_open_request(req, timeout_seconds)
+        with response as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except error.HTTPError as exc:
+        body = ""
+        try:
+            body = exc.read().decode("utf-8", errors="replace")[:500]
+        except Exception:
+            pass
+        logger.error("GNAI judge API error (%s): %s", exc.code, body)
+        return {"status": "error", "text": "", "error": f"HTTP {exc.code}: {body}"}
+    except error.URLError as exc:
+        logger.error("GNAI judge network error: %s", exc)
+        return {"status": "error", "text": "", "error": str(exc)}
+    except TimeoutError:
+        return {"status": "timeout", "text": "", "error": "Request timed out"}
+    except json.JSONDecodeError as exc:
+        return {"status": "error", "text": "", "error": f"Invalid GNAI JSON response: {exc}"}
+
+    text = "".join(
+        block.get("text", "")
+        for block in data.get("content", [])
+        if block.get("type") == "text"
+    )
+    if not text:
+        return {"status": "error", "text": "", "error": "No text content in response"}
+    return {"status": "success", "text": text}
+
+
+def _judge_via_gnai_openai(
+    prompt: str,
+    model: str,
+    api_key: str,
+    base_url: str,
+    timeout_seconds: float,
+) -> Dict[str, Any]:
+    """Call a GNAI OpenAI-family model using its chat-completions endpoint."""
+    payload = json.dumps({
+        "model": model,
+        "messages": [
+            {"role": "system", "content": _JUDGE_SYSTEM_MSG},
+            {"role": "user", "content": prompt},
+        ],
+        "max_completion_tokens": 2048,
+    }).encode("utf-8")
+    req = request.Request(
+        f"{base_url}/providers/openai/v1/chat/completions",
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        response = _gnai_open_request(req, timeout_seconds)
+        with response as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except error.HTTPError as exc:
+        body = ""
+        try:
+            body = exc.read().decode("utf-8", errors="replace")[:500]
+        except Exception:
+            pass
+        logger.error("GNAI judge API error (%s): %s", exc.code, body)
+        return {"status": "error", "text": "", "error": f"HTTP {exc.code}: {body}"}
+    except error.URLError as exc:
+        logger.error("GNAI judge network error: %s", exc)
+        return {"status": "error", "text": "", "error": str(exc)}
+    except TimeoutError:
+        return {"status": "timeout", "text": "", "error": "Request timed out"}
+    except json.JSONDecodeError as exc:
+        return {"status": "error", "text": "", "error": f"Invalid GNAI JSON response: {exc}"}
+
+    choices = data.get("choices", [])
+    if not choices:
+        return {"status": "error", "text": "", "error": "No choices in response"}
+    return {"status": "success", "text": choices[0].get("message", {}).get("content", "")}
 
 
 def _openai_compat_chat_endpoint(base_url: str) -> str:
@@ -1636,71 +1824,4 @@ def _judge_via_claude_cli(prompt: str, model: str, timeout_seconds: float) -> Di
         return {"status": "timeout", "text": "", "error": "claude -p timed out"}
     if result.returncode != 0:
         return {"status": "error", "text": "", "error": f"claude exit {result.returncode}: {result.stderr[:300]}"}
-    return {"status": "success", "text": result.stdout}
-
-
-def _judge_via_copilot_cli(prompt: str, model: str, timeout_seconds: float) -> Dict[str, Any]:
-    """Use the subscription-backed GitHub Copilot CLI as a JSON judge.
-
-    ``copilot`` uses the CLI's configured/default model. ``copilot:<model>``
-    passes the suffix to Copilot's ``--model`` flag (for example,
-    ``copilot:auto`` or ``copilot:gpt-5.4``).
-
-    Judge prompts contain all allowed grading evidence, so the CLI is started
-    without tools, repository instructions, MCP servers, temporary-directory
-    access, or remote-session features.
-    """
-    cmd: List[str] = [
-        "copilot",
-        "--silent",
-        "--no-color",
-        "--stream",
-        "off",
-        # Copilot requires automatic approval in non-interactive mode. The
-        # empty --available-tools allowlist below still means there are no
-        # tools to approve or expose to the model.
-        "--allow-all-tools",
-        "--no-ask-user",
-        "--no-custom-instructions",
-        "--disable-builtin-mcps",
-        "--disallow-temp-dir",
-        "--no-remote",
-        "--no-remote-export",
-        "--available-tools=",
-    ]
-    if ":" in model:
-        _, cli_model = model.split(":", 1)
-        if not cli_model:
-            return {"status": "error", "text": "", "error": "Copilot model cannot be empty"}
-        cmd.extend(["--model", cli_model])
-
-    try:
-        # Send the potentially large rubric/transcript through stdin instead
-        # of the command line. Copilot treats piped stdin as a non-interactive
-        # prompt when no -p/--prompt argument is present.
-        result = subprocess.run(
-            cmd,
-            input=f"{_JUDGE_SYSTEM_MSG}\n\n{prompt}",
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-            check=False,
-        )
-    except FileNotFoundError:
-        return {"status": "error", "text": "", "error": "copilot CLI not found"}
-    except subprocess.TimeoutExpired:
-        return {"status": "timeout", "text": "", "error": "copilot timed out"}
-
-    if result.returncode != 0:
-        error_output = result.stderr.strip() or result.stdout.strip()
-        status = (
-            "quota_exceeded"
-            if "exceeded your monthly quota" in error_output.lower()
-            else "error"
-        )
-        return {
-            "status": status,
-            "text": "",
-            "error": f"copilot exit {result.returncode}: {error_output[:300]}",
-        }
     return {"status": "success", "text": result.stdout}

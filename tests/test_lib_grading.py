@@ -180,63 +180,6 @@ class WorkspaceFilesForJudgeTests(unittest.TestCase):
         self.assertIn("TAIL_MARKER", content)
         self.assertIn(long_content, content)
 
-    def test_video_transcript_task_uses_only_final_judge_evidence(self) -> None:
-        with TemporaryDirectory() as tmp_dir:
-            workspace = Path(tmp_dir)
-            (workspace / "transcript.txt").write_text("clean transcript", encoding="utf-8")
-            (workspace / "video_summary.md").write_text("structured summary", encoding="utf-8")
-            (workspace / "video.info.json").write_text(
-                '{"large": "raw downloader metadata"}', encoding="utf-8"
-            )
-            (workspace / "video.en.vtt").write_text("raw subtitles", encoding="utf-8")
-
-            content = _read_workspace_files(
-                str(workspace),
-                task_id="task_video_transcript_extraction",
-                evidence_aware=True,
-            )
-
-        self.assertIn("### File: transcript.txt", content)
-        self.assertIn("clean transcript", content)
-        self.assertIn("### File: video_summary.md", content)
-        self.assertIn("structured summary", content)
-        self.assertNotIn("video.info.json", content)
-        self.assertNotIn("raw downloader metadata", content)
-        self.assertNotIn("video.en.vtt", content)
-        self.assertNotIn("raw subtitles", content)
-
-    def test_video_transcript_task_keeps_full_evidence_before_context_failure(self) -> None:
-        with TemporaryDirectory() as tmp_dir:
-            workspace = Path(tmp_dir)
-            (workspace / "transcript.txt").write_text("clean transcript", encoding="utf-8")
-            (workspace / "video_summary.md").write_text("structured summary", encoding="utf-8")
-            (workspace / "video.info.json").write_text("raw metadata", encoding="utf-8")
-
-            content = _read_workspace_files(
-                str(workspace), task_id="task_video_transcript_extraction"
-            )
-
-        self.assertIn("video.info.json", content)
-        self.assertIn("raw metadata", content)
-
-    def test_reduced_video_evidence_is_bounded_even_for_allowed_files(self) -> None:
-        with TemporaryDirectory() as tmp_dir:
-            workspace = Path(tmp_dir)
-            (workspace / "transcript.txt").write_text("T" * 70_000, encoding="utf-8")
-            (workspace / "video_summary.md").write_text("summary", encoding="utf-8")
-            (workspace / "video.info.json").write_text("raw metadata", encoding="utf-8")
-
-            content = _read_workspace_files(
-                str(workspace),
-                task_id="task_video_transcript_extraction",
-                evidence_aware=True,
-            )
-
-        self.assertLessEqual(len(content), 192_000)
-        self.assertIn("[Judge evidence truncated to fit Copilot context]", content)
-        self.assertIn("summary", content)
-        self.assertNotIn("raw metadata", content)
-
     def test_compute_cache_key_changes_when_workspace_content_changes(self) -> None:
         first_key = _compute_cache_key(
             "task_report",
@@ -256,163 +199,71 @@ class WorkspaceFilesForJudgeTests(unittest.TestCase):
         self.assertNotEqual(first_key, second_key)
 
 
-class JudgeRetryTests(unittest.TestCase):
-    def test_copilot_context_overflow_retries_with_task_evidence_allowlist(self) -> None:
-        task = Task(
-            task_id="task_video_transcript_extraction",
-            name="Video Transcript Extraction and Summary",
-            category="coding",
-            grading_type="llm_judge",
-            timeout_seconds=300,
-            workspace_files=[],
-            prompt="Create transcript.txt and video_summary.md.",
-            expected_behavior="Create both deliverables.",
-            grading_criteria=["Creates the transcript and summary"],
-            llm_judge_rubric="Grade the transcript and summary.",
-        )
-        context_failure = {
-            "status": "error",
-            "text": "",
-            "error": (
-                "copilot exit 1: 400 prompt token count of 1488815 "
-                "exceeds the limit of 272000"
-            ),
-        }
-        judge_success = {
-            "status": "success",
-            "text": (
-                '{"scores": {"completion": 1.0}, "total": 1.0, '
-                '"notes": "Complete"}'
-            ),
-        }
-
-        with TemporaryDirectory() as tmp_dir:
-            workspace = Path(tmp_dir)
-            (workspace / "transcript.txt").write_text("clean transcript", encoding="utf-8")
-            (workspace / "video_summary.md").write_text("structured summary", encoding="utf-8")
-            (workspace / "video.info.json").write_text("raw metadata", encoding="utf-8")
-            execution_result = {
-                "status": "success",
-                "transcript": [],
-                "workspace": str(workspace),
-            }
-
-            with patch(
-                "lib_grading.call_judge_api",
-                side_effect=[context_failure, judge_success],
-            ) as call:
-                result = grade_task(
-                    task=task,
-                    execution_result=execution_result,
-                    skill_dir=ROOT,
-                    judge_model="copilot:gpt-5.4-mini",
-                    judge_backend="api",
-                )
-
-        self.assertEqual(call.call_count, 2)
-        full_prompt = call.call_args_list[0].kwargs["prompt"]
-        reduced_prompt = call.call_args_list[1].kwargs["prompt"]
-        self.assertIn("raw metadata", full_prompt)
-        self.assertNotIn("raw metadata", reduced_prompt)
-        self.assertIn("clean transcript", reduced_prompt)
-        self.assertIn("structured summary", reduced_prompt)
-        self.assertEqual(result.score, 1.0)
-
-    def test_copilot_context_overflow_uses_cached_reduced_evidence(self) -> None:
-        task = Task(
-            task_id="task_video_transcript_extraction",
-            name="Video Transcript Extraction and Summary",
-            category="coding",
-            grading_type="llm_judge",
-            timeout_seconds=300,
-            workspace_files=[],
-            prompt="Create transcript.txt and video_summary.md.",
-            expected_behavior="Create both deliverables.",
-            grading_criteria=["Creates the transcript and summary"],
-            llm_judge_rubric="Grade the transcript and summary.",
-        )
-        context_failure = {
-            "status": "error",
-            "text": "",
-            "error": "prompt token count of 1,488,815 exceeds limit of 272,000",
-        }
-
-        with TemporaryDirectory() as tmp_dir:
-            workspace = Path(tmp_dir)
-            (workspace / "transcript.txt").write_text("clean transcript", encoding="utf-8")
-            (workspace / "video_summary.md").write_text("structured summary", encoding="utf-8")
-            (workspace / "video.info.json").write_text("raw metadata", encoding="utf-8")
-            reduced_content = _read_workspace_files(
-                str(workspace), task.task_id, evidence_aware=True
-            )
-            reduced_key = _compute_cache_key(
-                task.task_id,
-                "",
-                task.llm_judge_rubric,
-                "copilot:auto",
-                reduced_content,
-            )
-            cached = {
-                reduced_key: {
-                    "score": 0.8,
-                    "max_score": 1.0,
-                    "breakdown": {"completion": 0.8},
-                    "notes": "Cached reduced result",
-                }
-            }
-            with patch.object(lib_grading, "_judge_cache", cached), patch(
-                "lib_grading.call_judge_api", return_value=context_failure
-            ) as call:
-                result = grade_task(
-                    task=task,
-                    execution_result={
-                        "status": "success",
-                        "transcript": [],
-                        "workspace": str(workspace),
-                    },
-                    skill_dir=ROOT,
-                    judge_model="copilot:auto",
-                    judge_backend="api",
-                )
-
-        call.assert_called_once()
-        self.assertEqual(result.score, 0.8)
-        self.assertEqual(result.notes, "Cached reduced result [cached]")
-
-    def test_quota_exhaustion_is_not_retried(self) -> None:
-        task = Task(
-            task_id="quota-exhaustion-smoke",
-            name="Quota exhaustion smoke",
+class AutomatedWorkspaceDiscoveryTests(unittest.TestCase):
+    @staticmethod
+    def _task(*, strict_output_paths: bool = False) -> Task:
+        return Task(
+            task_id="nested-artifact",
+            name="Nested artifact discovery",
             category="test",
-            grading_type="llm_judge",
+            grading_type="automated",
             timeout_seconds=30,
             workspace_files=[],
-            prompt="Respond with a greeting.",
-            expected_behavior="A greeting.",
-            grading_criteria=["Produces a greeting"],
+            prompt="Create deliverable.txt somewhere in the workspace.",
+            expected_behavior="A deliverable exists in the workspace.",
+            grading_criteria=["Creates deliverable"],
+            automated_checks="""```python
+def grade(transcript, workspace_path):
+    from pathlib import Path
+    return {"file_created": 1.0 if (Path(workspace_path) / "deliverable.txt").exists() else 0.0}
+```""",
+            frontmatter={"strict_output_paths": strict_output_paths},
         )
-        execution_result = {"status": "success", "transcript": [], "workspace": ""}
-        quota_failure = {
-            "status": "quota_exceeded",
-            "text": "",
-            "error": "copilot exit 1: You have exceeded your monthly quota",
-        }
 
-        with patch("lib_grading.call_judge_api", return_value=quota_failure) as call, patch(
-            "lib_grading.time.sleep"
-        ) as sleep:
+    def test_automated_grader_finds_a_unique_nested_artifact(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            artifact_dir = workspace / "artifacts"
+            artifact_dir.mkdir()
+            (artifact_dir / "deliverable.txt").write_text("complete", encoding="utf-8")
+
             result = grade_task(
-                task=task,
-                execution_result=execution_result,
+                task=self._task(),
+                execution_result={"status": "success", "transcript": [], "workspace": str(workspace)},
                 skill_dir=ROOT,
-                judge_model="copilot:auto",
-                judge_backend="api",
             )
 
-        self.assertEqual(call.call_count, 1)
-        sleep.assert_not_called()
+        self.assertEqual(result.score, 1.0)
+
+    def test_strict_output_paths_does_not_flatten_nested_artifacts(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            artifact_dir = workspace / "artifacts"
+            artifact_dir.mkdir()
+            (artifact_dir / "deliverable.txt").write_text("complete", encoding="utf-8")
+
+            result = grade_task(
+                task=self._task(strict_output_paths=True),
+                execution_result={"status": "success", "transcript": [], "workspace": str(workspace)},
+                skill_dir=ROOT,
+            )
+
         self.assertEqual(result.score, 0.0)
-        self.assertIn("no parseable response", result.notes)
+
+
+class GitRescueWindowsFallbackTests(unittest.TestCase):
+    def test_windows_safe_fallback_executes_git_recovery_without_a_posix_shell(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            (workspace / "recovery.sh").write_text(
+                "git branch feature/login-fix\n"
+                "git reset --hard HEAD~2\n",
+                encoding="utf-8",
+            )
+
+            scores = lib_grading._grade_git_rescue_recovery_windows_safe(str(workspace))
+
+        self.assertTrue(all(score == 1.0 for score in scores.values()))
 
 
 if __name__ == "__main__":

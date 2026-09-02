@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -107,6 +106,128 @@ class KiloJudgeTests(unittest.TestCase):
             "test-key",
             30,
         )
+
+
+class GnaiJudgeTests(unittest.TestCase):
+    def test_call_judge_api_gnai_requires_a_key_or_readable_key_file(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"GNAI_API_KEY_FILE": "/definitely/missing/gnai_api_key.rc"},
+            clear=True,
+        ):
+            result = call_judge_api(prompt="grade this", model="gnai/claude-haiku-4.5")
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(
+            result["error"],
+            "GNAI_API_KEY not set and GNAI_API_KEY_FILE could not be read",
+        )
+
+    def test_call_judge_api_gnai_posts_native_anthropic_request(self) -> None:
+        captured_request = None
+
+        def fake_urlopen(req, timeout, context=None):
+            nonlocal captured_request
+            captured_request = req
+            self.assertEqual(timeout, 12.5)
+            self.assertIsNotNone(context)
+            return _FakeResponse({"content": [{"type": "text", "text": '{"total": 1.0}'}]})
+
+        env = {
+            "GNAI_API_KEY": "test-key",
+            "GNAI_BASE_URL": "https://gnai.example.test",
+            "GNAI_USE_ENV_PROXY": "1",
+        }
+        with patch.dict(os.environ, env, clear=True), patch(
+            "lib_agent.request.urlopen", side_effect=fake_urlopen
+        ):
+            result = call_judge_api(
+                prompt="grade this",
+                model="gnai/claude-haiku-4.5",
+                timeout_seconds=12.5,
+            )
+
+        self.assertEqual(result, {"status": "success", "text": '{"total": 1.0}'})
+        self.assertIsNotNone(captured_request)
+        self.assertEqual(
+            captured_request.full_url,
+            "https://gnai.example.test/providers/anthropic/v1/messages",
+        )
+        self.assertEqual(captured_request.headers["Authorization"], "Bearer test-key")
+        payload = json.loads(captured_request.data.decode("utf-8"))
+        self.assertEqual(payload["model"], "claude-4-5-haiku")
+        self.assertEqual(payload["max_tokens"], 2048)
+        self.assertEqual(payload["messages"], [{"role": "user", "content": "grade this"}])
+
+    def test_call_judge_api_gnai_routes_luna_to_openai_chat_completions(self) -> None:
+        captured_request = None
+
+        def fake_urlopen(req, timeout, context=None):
+            nonlocal captured_request
+            captured_request = req
+            self.assertEqual(timeout, 30)
+            self.assertIsNotNone(context)
+            return _FakeResponse()
+
+        env = {
+            "GNAI_API_KEY": "test-key",
+            "GNAI_BASE_URL": "https://gnai.example.test",
+            "GNAI_USE_ENV_PROXY": "1",
+        }
+        with patch.dict(os.environ, env, clear=True), patch(
+            "lib_agent.request.urlopen", side_effect=fake_urlopen
+        ):
+            result = call_judge_api(
+                prompt="grade this", model="gnai/gpt-5.6-luna", timeout_seconds=30
+            )
+
+        self.assertEqual(result, {"status": "success", "text": '{"total": 1.0}'})
+        self.assertIsNotNone(captured_request)
+        self.assertEqual(
+            captured_request.full_url,
+            "https://gnai.example.test/providers/openai/v1/chat/completions",
+        )
+        payload = json.loads(captured_request.data.decode("utf-8"))
+        self.assertEqual(payload["model"], "gpt-5.6-luna")
+        self.assertEqual(payload["max_completion_tokens"], 2048)
+        self.assertNotIn("temperature", payload)
+
+    def test_call_judge_api_gnai_routes_grok_and_deepseek_to_openai_chat_completions(self) -> None:
+        captured_requests = []
+
+        def fake_urlopen(req, timeout, context=None):
+            captured_requests.append(req)
+            self.assertEqual(timeout, 30)
+            self.assertIsNotNone(context)
+            return _FakeResponse()
+
+        env = {
+            "GNAI_API_KEY": "test-key",
+            "GNAI_BASE_URL": "https://gnai.example.test",
+            "GNAI_USE_ENV_PROXY": "1",
+        }
+        with patch.dict(os.environ, env, clear=True), patch(
+            "lib_agent.request.urlopen", side_effect=fake_urlopen
+        ):
+            for model in ("grok-4.6", "deepseek-v4-flash"):
+                with self.subTest(model=model):
+                    result = call_judge_api(
+                        prompt="grade this", model=f"gnai/{model}", timeout_seconds=30
+                    )
+                    self.assertEqual(
+                        result, {"status": "success", "text": '{"total": 1.0}'}
+                    )
+
+        self.assertEqual(len(captured_requests), 2)
+        for req, model in zip(captured_requests, ("grok-4.6", "deepseek-v4-flash")):
+            self.assertEqual(
+                req.full_url,
+                "https://gnai.example.test/providers/openai/v1/chat/completions",
+            )
+            payload = json.loads(req.data.decode("utf-8"))
+            self.assertEqual(payload["model"], model)
+            self.assertEqual(payload["max_completion_tokens"], 2048)
+            self.assertNotIn("temperature", payload)
 
 
 class OllamaJudgeTests(unittest.TestCase):
@@ -280,84 +401,6 @@ class LemonadeJudgeTests(unittest.TestCase):
         self.assertEqual(payload["model"], "Qwen3-Coder-30B-A3B-Instruct-GGUF")
         self.assertEqual(payload["temperature"], 0.0)
         self.assertEqual(payload["max_completion_tokens"], 2048)
-
-
-class CopilotJudgeTests(unittest.TestCase):
-    def test_call_judge_api_copilot_uses_default_model_and_safe_options(self) -> None:
-        completed = subprocess.CompletedProcess(
-            args=["copilot"], returncode=0, stdout='{"total": 0.75}', stderr=""
-        )
-        with patch("lib_agent.subprocess.run", return_value=completed) as run:
-            result = call_judge_api(prompt="grade this", model="copilot", timeout_seconds=12.5)
-
-        self.assertEqual(result, {"status": "success", "text": '{"total": 0.75}'})
-        run.assert_called_once()
-        cmd = run.call_args.args[0]
-        self.assertEqual(cmd[0], "copilot")
-        self.assertNotIn("--model", cmd)
-        self.assertIn("--allow-all-tools", cmd)
-        self.assertIn("--available-tools=", cmd)
-        self.assertIn("--no-custom-instructions", cmd)
-        self.assertIn("--disable-builtin-mcps", cmd)
-        self.assertIn("--disallow-temp-dir", cmd)
-        self.assertIn("--no-remote", cmd)
-        self.assertIn("--no-remote-export", cmd)
-        self.assertEqual(run.call_args.kwargs["timeout"], 12.5)
-        self.assertEqual(
-            run.call_args.kwargs["input"],
-            "You are a strict grading function. "
-            "Respond with ONLY a JSON object, no prose, no markdown fences, no extra text."
-            "\n\ngrade this",
-        )
-
-    def test_call_judge_api_copilot_passes_requested_model(self) -> None:
-        completed = subprocess.CompletedProcess(
-            args=["copilot"], returncode=0, stdout='{"total": 1.0}', stderr=""
-        )
-        with patch("lib_agent.subprocess.run", return_value=completed) as run:
-            result = call_judge_api(prompt="grade this", model="copilot:auto")
-
-        self.assertEqual(result, {"status": "success", "text": '{"total": 1.0}'})
-        cmd = run.call_args.args[0]
-        self.assertEqual(cmd[cmd.index("--model") + 1], "auto")
-
-    def test_call_judge_api_copilot_rejects_empty_model_suffix(self) -> None:
-        result = call_judge_api(prompt="grade this", model="copilot:")
-
-        self.assertEqual(
-            result,
-            {"status": "error", "text": "", "error": "Copilot model cannot be empty"},
-        )
-
-    def test_call_judge_api_copilot_handles_missing_cli_timeout_and_exit_error(self) -> None:
-        with patch("lib_agent.subprocess.run", side_effect=FileNotFoundError):
-            missing = call_judge_api(prompt="grade this", model="copilot")
-        self.assertEqual(missing["error"], "copilot CLI not found")
-
-        with patch("lib_agent.subprocess.run", side_effect=subprocess.TimeoutExpired("copilot", 5)):
-            timeout = call_judge_api(prompt="grade this", model="copilot")
-        self.assertEqual(timeout, {"status": "timeout", "text": "", "error": "copilot timed out"})
-
-        completed = subprocess.CompletedProcess(
-            args=["copilot"], returncode=2, stdout="", stderr="model unavailable"
-        )
-        with patch("lib_agent.subprocess.run", return_value=completed):
-            failed = call_judge_api(prompt="grade this", model="copilot:auto")
-        self.assertEqual(failed["status"], "error")
-        self.assertEqual(failed["error"], "copilot exit 2: model unavailable")
-
-    def test_call_judge_api_copilot_marks_quota_exhaustion_as_non_retriable(self) -> None:
-        completed = subprocess.CompletedProcess(
-            args=["copilot"],
-            returncode=1,
-            stdout="You have exceeded your monthly quota",
-            stderr="",
-        )
-        with patch("lib_agent.subprocess.run", return_value=completed):
-            result = call_judge_api(prompt="grade this", model="copilot:auto")
-
-        self.assertEqual(result["status"], "quota_exceeded")
-        self.assertIn("exceeded your monthly quota", result["error"])
 
 
 if __name__ == "__main__":

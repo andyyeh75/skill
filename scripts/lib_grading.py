@@ -9,7 +9,12 @@ import json
 import logging
 import os
 import re
+import shlex
+import subprocess
+import tempfile
 import time
+from collections import Counter
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -202,26 +207,30 @@ def _grade_automated(
     transcript = _normalize_transcript_content_blocks(
         execution_result.get("transcript", [])
     )
-    try:
-        scores = grade_func(
-            transcript,
-            workspace_path,
-        )
-    except FileNotFoundError as exc:
-        # Some embedded automated graders assume POSIX shell/temp-path behavior.
-        # On Windows this can surface as WinError 3 even when the agent output is
-        # present.  Keep the normal grader for all platforms, but use a
-        # Windows-safe fallback for the git rescue task so local Windows runs are
-        # comparable to official/Linux runs.
-        if task.task_id == "task_git_rescue_recovery" and os.name == "nt":
-            logger.warning(
-                "Automated grader for %s hit Windows path error; using Windows-safe fallback: %s",
-                task.task_id,
-                exc,
+    strict_output_paths = bool(task.frontmatter.get("strict_output_paths", False))
+    with _automated_workspace_view(
+        workspace_path, strict_output_paths=strict_output_paths
+    ) as grader_workspace_path:
+        try:
+            scores = grade_func(
+                transcript,
+                grader_workspace_path,
             )
-            scores = _grade_git_rescue_recovery_windows_safe(workspace_path)
-        else:
-            raise
+        except FileNotFoundError as exc:
+            # Some embedded automated graders assume POSIX shell/temp-path behavior.
+            # On Windows this can surface as WinError 3 even when the agent output is
+            # present.  Keep the normal grader for all platforms, but use a
+            # Windows-safe fallback for the git rescue task so local Windows runs are
+            # comparable to official/Linux runs.
+            if task.task_id == "task_git_rescue_recovery" and os.name == "nt":
+                logger.warning(
+                    "Automated grader for %s hit Windows path error; using Windows-safe fallback: %s",
+                    task.task_id,
+                    exc,
+                )
+                scores = _grade_git_rescue_recovery_windows_safe(grader_workspace_path)
+            else:
+                raise
 
     if not isinstance(scores, dict):
         scores = {}
@@ -238,6 +247,197 @@ def _grade_automated(
         breakdown=_normalize_score_dict(scores),
         notes="",
     )
+
+
+def _grade_git_rescue_recovery_windows_safe(workspace_path: str) -> Dict[str, float]:
+    """Grade git rescue commands without POSIX shell or ``/bin/bash`` support."""
+    scores: Dict[str, float] = {
+        "file_created": 0.0,
+        "git_only_commands": 0.0,
+        "executes_successfully": 0.0,
+        "feature_branch_created": 0.0,
+        "main_reset_correctly": 0.0,
+        "commits_preserved_on_feature": 0.0,
+        "working_tree_clean": 0.0,
+    }
+
+    workspace = Path(workspace_path)
+    recovery_file = workspace / "recovery.sh"
+    if not recovery_file.exists():
+        return scores
+    scores["file_created"] = 1.0
+
+    try:
+        commands = [
+            line.strip()
+            for line in recovery_file.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+    except OSError:
+        return scores
+    if not commands:
+        return scores
+    if all(command.startswith("git ") for command in commands):
+        scores["git_only_commands"] = 1.0
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        repo = Path(temp_dir) / "repo"
+        repo.mkdir()
+
+        def run_git(*args: str) -> subprocess.CompletedProcess[str] | None:
+            try:
+                return subprocess.run(
+                    ["git", *args],
+                    cwd=repo,
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                return None
+
+        setup_commands = [
+            ("init",),
+            ("branch", "-M", "main"),
+            ("config", "user.name", "PinchBench"),
+            ("config", "user.email", "bench@example.com"),
+            ("config", "commit.gpgsign", "false"),
+        ]
+        for args in setup_commands:
+            result = run_git(*args)
+            if result is None or result.returncode != 0:
+                return scores
+
+        try:
+            (repo / "app.txt").write_text("base\n", encoding="utf-8")
+        except OSError:
+            return scores
+        for args in (("add", "app.txt"), ("commit", "-m", "base commit")):
+            result = run_git(*args)
+            if result is None or result.returncode != 0:
+                return scores
+
+        for change, message in (
+            ("feature change 1\n", "feature commit 1"),
+            ("feature change 2\n", "feature commit 2"),
+        ):
+            try:
+                with (repo / "app.txt").open("a", encoding="utf-8") as app_file:
+                    app_file.write(change)
+            except OSError:
+                return scores
+            for args in (("add", "app.txt"), ("commit", "-m", message)):
+                result = run_git(*args)
+                if result is None or result.returncode != 0:
+                    return scores
+
+        before_main = run_git("rev-parse", "main")
+        base_commit = run_git("rev-parse", "HEAD~2")
+        misplaced_commits = run_git("rev-list", "--reverse", "HEAD~2..HEAD")
+        original_messages = run_git("log", "--format=%s", "--reverse", "HEAD~2..HEAD")
+        if any(result is None or result.returncode != 0 for result in (
+            before_main, base_commit, misplaced_commits, original_messages
+        )):
+            return scores
+        assert before_main is not None
+        assert base_commit is not None
+        assert misplaced_commits is not None
+        assert original_messages is not None
+        if (
+            not before_main.stdout.strip()
+            or not base_commit.stdout.strip()
+            or len(misplaced_commits.stdout.splitlines()) != 2
+        ):
+            return scores
+
+        for command in commands:
+            try:
+                args = shlex.split(command)
+            except ValueError:
+                return scores
+            if not args or args[0] != "git":
+                return scores
+            result = run_git(*args[1:])
+            if result is None or result.returncode != 0:
+                return scores
+        scores["executes_successfully"] = 1.0
+
+        feature_commit = run_git("rev-parse", "feature/login-fix")
+        if feature_commit is not None and feature_commit.returncode == 0:
+            scores["feature_branch_created"] = 1.0
+
+        new_main = run_git("rev-parse", "main")
+        if new_main is not None and new_main.returncode == 0:
+            if new_main.stdout.strip() == base_commit.stdout.strip():
+                scores["main_reset_correctly"] = 1.0
+
+        feature_log = run_git("log", "--format=%s", "--reverse", "feature/login-fix")
+        if feature_log is not None and feature_log.returncode == 0:
+            feature_messages = feature_log.stdout.strip().splitlines()
+            expected_messages = original_messages.stdout.strip().splitlines()
+            if len(feature_messages) >= 2 and feature_messages[-2:] == expected_messages:
+                scores["commits_preserved_on_feature"] = 1.0
+
+        status = run_git("status", "--porcelain")
+        if status is not None and status.returncode == 0 and not status.stdout.strip():
+            scores["working_tree_clean"] = 1.0
+
+    return scores
+
+
+@contextmanager
+def _automated_workspace_view(
+    workspace_path: str,
+    *,
+    strict_output_paths: bool = False,
+):
+    """Expose uniquely named nested artifacts to legacy root-only graders.
+
+    Most task prompts require an artifact *in the workspace* without requiring
+    it at the workspace root.  Older embedded graders often use
+    ``workspace / \"file.ext\"`` or ``workspace.glob(\"*.ext\")``, which
+    incorrectly rejects a valid artifact created in a subfolder.  The staged
+    view keeps the original top-level tree and adds root-level symlink aliases
+    only for uniquely named files below the root.  Tasks whose directory layout
+    is part of the contract can set ``strict_output_paths: true`` in frontmatter.
+    """
+    workspace = Path(workspace_path) if workspace_path else None
+    if strict_output_paths or not workspace or not workspace.is_dir():
+        yield workspace_path
+        return
+
+    nested_files = [
+        path
+        for path in workspace.rglob("*")
+        if path.is_file() and path.parent != workspace
+    ]
+    if not nested_files:
+        yield workspace_path
+        return
+
+    name_counts = Counter(path.name for path in nested_files)
+    with tempfile.TemporaryDirectory(prefix="pinchbench-grader-") as temp_dir:
+        staged_workspace = Path(temp_dir) / "workspace"
+        try:
+            staged_workspace.mkdir()
+
+            # Preserve the original directory structure without copying large
+            # fixtures. Automated graders are read-only by design.
+            for child in workspace.iterdir():
+                os.symlink(child, staged_workspace / child.name, target_is_directory=child.is_dir())
+
+            for artifact in nested_files:
+                alias = staged_workspace / artifact.name
+                if name_counts[artifact.name] == 1 and not alias.exists():
+                    os.symlink(artifact, alias)
+        except OSError as exc:
+            # Keep benchmark execution functional on platforms that forbid symlinks.
+            logger.debug("Could not stage recursive artifact aliases: %s", exc)
+            yield workspace_path
+            return
+
+        yield str(staged_workspace)
 
 
 _PRIVATE_IMAGE_KEY_FILENAME = "image_classification_answer_key.json"
@@ -306,8 +506,7 @@ def _grade_llm_judge(
             "   [VERBOSE] Transcript summary for judge (first 1000 chars):\n%s",
             transcript_summary[:1000],
         )
-    workspace_path = execution_result.get("workspace", "")
-    workspace_content = _read_workspace_files(workspace_path)
+    workspace_content = _read_workspace_files(execution_result.get("workspace", ""))
     if verbose and workspace_content:
         logger.info(
             "   [VERBOSE] Workspace files passed to judge (first 500 chars):\n%s",
@@ -341,8 +540,6 @@ def _grade_llm_judge(
         logger.info("   [VERBOSE] Cache MISS for %s (key=%s)", task.task_id, cache_key[:8])
     
     prompt = _build_judge_prompt(task, transcript_summary, rubric, workspace_content)
-    using_reduced_evidence = False
-
     max_judge_attempts = 2
     raw_parsed: Dict[str, Any] = {}
     for attempt in range(max_judge_attempts):
@@ -366,53 +563,6 @@ def _grade_llm_judge(
                     max_judge_attempts,
                     judge_result.get("error", judge_result.get("status")),
                 )
-                if (
-                    not using_reduced_evidence
-                    and _is_copilot_context_limit_error(judge_model, judge_result)
-                ):
-                    workspace_content = _read_workspace_files(
-                        workspace_path,
-                        task_id=task.task_id,
-                        evidence_aware=True,
-                    )
-                    prompt = _build_judge_prompt(
-                        task, transcript_summary, rubric, workspace_content
-                    )
-                    cache_key = _compute_cache_key(
-                        task.task_id,
-                        transcript_summary,
-                        rubric,
-                        judge_model,
-                        workspace_content,
-                    )
-                    using_reduced_evidence = True
-                    if cache_key in _judge_cache:
-                        cached = _judge_cache[cache_key]
-                        get_judge_cache_stats._hits = getattr(
-                            get_judge_cache_stats, "_hits", 0
-                        ) + 1
-                        logger.info(
-                            "Cache HIT for reduced judge evidence for %s (key=%s)",
-                            task.task_id,
-                            cache_key[:8],
-                        )
-                        return GradeResult(
-                            task_id=task.task_id,
-                            score=cached["score"],
-                            max_score=cached["max_score"],
-                            grading_type="llm_judge",
-                            breakdown=cached.get("breakdown", {}),
-                            notes=cached.get("notes", "") + " [cached]",
-                        )
-                    logger.warning(
-                        "Copilot context limit exceeded for %s; retrying with "
-                        "evidence-aware workspace reduction",
-                        task.task_id,
-                    )
-                    continue
-                if judge_result.get("status") == "quota_exceeded":
-                    logger.warning("Judge quota exhausted; not retrying %s", task.task_id)
-                    break
                 if attempt < max_judge_attempts - 1:
                     time.sleep(2**attempt)
                     continue
@@ -615,44 +765,8 @@ def _summarize_transcript(transcript: List[Dict[str, Any]]) -> str:
     return "\n".join(summary_parts)
 
 
-_TASK_WORKSPACE_EVIDENCE_FILES = {
-    # yt-dlp creates large machine-readable metadata and subtitle artifacts for
-    # this task.  The rubric evaluates the cleaned transcript and final summary,
-    # so send only those agent deliverables to the LLM judge.
-    "task_video_transcript_extraction": {
-        "transcript.txt",
-        "video_summary.md",
-    },
-}
-
-_REDUCED_EVIDENCE_MAX_FILE_CHARS = 64_000
-_REDUCED_EVIDENCE_MAX_TOTAL_CHARS = 192_000
-_COPILOT_CONTEXT_LIMIT_RE = re.compile(
-    r"prompt token count(?: of)?\s*[\d,]+\s+exceeds(?: the)? limit(?: of)?\s*[\d,]+",
-    re.IGNORECASE,
-)
-
-
-def _is_copilot_context_limit_error(
-    judge_model: str, judge_result: Dict[str, Any]
-) -> bool:
-    if not (judge_model == "copilot" or judge_model.startswith("copilot:")):
-        return False
-    error_text = str(judge_result.get("error", ""))
-    return bool(_COPILOT_CONTEXT_LIMIT_RE.search(error_text))
-
-
-def _read_workspace_files(
-    workspace_path: str,
-    task_id: str = "",
-    evidence_aware: bool = False,
-) -> str:
-    """Read relevant user-created text files for the LLM judge.
-
-    Most tasks retain the existing all-text-files behavior.  Tasks with large
-    intermediate artifacts may define an explicit evidence allowlist so raw
-    source data does not overwhelm the judge context window.
-    """
+def _read_workspace_files(workspace_path: str) -> str:
+    """Read user-created text files from workspace to provide grading context."""
     if not workspace_path:
         return ""
     workspace = Path(workspace_path)
@@ -668,11 +782,7 @@ def _read_workspace_files(
         "AGENTS.md",
     }
     skip_dirs = {".git", ".openclaw", "__pycache__", "node_modules", "skills"}
-    evidence_files = (
-        _TASK_WORKSPACE_EVIDENCE_FILES.get(task_id) if evidence_aware else None
-    )
     file_contents: List[str] = []
-    total_chars = 0
     for f in sorted(workspace.rglob("*")):
         if not f.is_file():
             continue
@@ -682,34 +792,11 @@ def _read_workspace_files(
             continue
         if f.name in skip_names:
             continue
-        if evidence_files is not None and rel.as_posix() not in evidence_files:
-            continue
         section_header = f"### File: {rel}\n"
-        separator = "\n\n" if file_contents else ""
         try:
             content = f.read_text(encoding="utf-8")
-            if evidence_aware:
-                remaining = (
-                    _REDUCED_EVIDENCE_MAX_TOTAL_CHARS
-                    - total_chars
-                    - len(separator)
-                    - len(section_header)
-                )
-                if remaining <= 0:
-                    break
-                content_limit = min(_REDUCED_EVIDENCE_MAX_FILE_CHARS, remaining)
-                if len(content) > content_limit:
-                    truncation_marker = "\n[Judge evidence truncated to fit Copilot context]"
-                    if content_limit > len(truncation_marker):
-                        content = (
-                            content[: content_limit - len(truncation_marker)]
-                            + truncation_marker
-                        )
-                    else:
-                        content = content[:content_limit]
             section = f"{section_header}{content}"
             file_contents.append(section)
-            total_chars += len(separator) + len(section)
         except (OSError, UnicodeDecodeError):
             pass
     return "\n\n".join(file_contents)

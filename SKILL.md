@@ -18,9 +18,6 @@ PinchBench measures how well LLM models perform as the brain of an OpenClaw agen
 - [uv](https://docs.astral.sh/uv/) package manager or an initialized `.venv`
 - A running OpenClaw instance
 - API credentials for the tested model provider
-- For `--judge copilot` or `--judge copilot:<model>`: the standalone GitHub
-  Copilot CLI, authenticated persistently with `copilot login`, and access to
-  the requested Copilot model.
 
 ## Quick Start
 
@@ -51,25 +48,7 @@ Supported direct judge prefixes:
 - `anthropic/<model>` using `ANTHROPIC_API_KEY`
 - `openai/<model>` using `OPENAI_API_KEY`
 - `claude` or `claude:<model>` using headless Claude CLI
-- `copilot` or `copilot:<model>` using the authenticated GitHub Copilot CLI
-
-### Copilot Judge Preflight
-
-The SYCL Qwen benchmark launcher validates Copilot before it starts the model
-server. For a non-sanity suite using a Copilot judge, it sends a minimal,
-no-tool `Reply with exactly: OK` request to the selected model. This confirms
-the locally persisted credential and current model access; it cannot guarantee
-that a credential will remain valid after the preflight (for example, if it is
-revoked or expires during a long run).
-
-The launcher writes the outcome to `copilot_preflight.log` in the run directory
-and refuses to start if the check fails. Its settings are:
-
-| Variable | Default | Description |
-| --- | --- | --- |
-| `PINCHBENCH_COPILOT_PREFLIGHT` | `1` | Set to `0` only to explicitly skip the live Copilot check. |
-| `PINCHBENCH_COPILOT_PREFLIGHT_TIMEOUT` | `90` | Maximum duration, in seconds, for the preflight request. |
-| `PINCHBENCH_COPILOT_BIN` | `copilot` | Path or command name of the Copilot CLI. |
+- `gnai/<model>` using `GNAI_API_KEY` or `~/gnai_api_key.rc`
 
 ### SYCL Runtime and Scoring Limits
 
@@ -86,6 +65,42 @@ reaches that 10-minute limit receives a score of `0.0`:
 The result JSON retains elapsed time and timeout metadata so the final report
 can distinguish an execution cutoff from a score zero caused by the
 10-minute limit.
+
+### OpenClaw SYCL provider stream-idle watchdog
+
+For long local llama.cpp prefills, configure the OpenClaw provider timeout
+separately from PinchBench task cutoffs. The provider stream-idle watchdog
+aborts a model request if no response token arrives before this limit; changing
+`--timeout-multiplier`, an agent `--timeout`, or a systemd service lifetime
+does not raise it.
+
+For the local `sycl` provider, set a 30-minute ceiling in
+`~/.openclaw/openclaw.json`:
+
+```json
+{
+  "models": {
+    "providers": {
+      "sycl": {
+        "timeoutSeconds": 1800
+      }
+    }
+  }
+}
+```
+
+Validate and activate the change before benchmarking:
+
+```bash
+openclaw config validate
+systemctl --user restart openclaw-gateway.service
+openclaw config get models.providers.sycl.timeoutSeconds
+```
+
+Use an OpenClaw agent timeout of at least 1800 seconds for the corresponding
+run. Apply this only to the intended `sycl` provider; do not raise unrelated
+cloud or judge-provider timeouts. Record the setting in the run report because
+an idle-watchdog abort is not a model-quality or TTFT result.
 
 ## Command Line Options
 
