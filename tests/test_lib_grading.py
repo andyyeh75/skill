@@ -251,5 +251,20 @@ def grade(transcript, workspace_path):
         self.assertEqual(result.score, 0.0)
 
 
+class GitRescueWindowsFallbackTests(unittest.TestCase):
+    def test_windows_safe_fallback_executes_git_recovery_without_a_posix_shell(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            (workspace / "recovery.sh").write_text(
+                "git branch feature/login-fix\n"
+                "git reset --hard HEAD~2\n",
+                encoding="utf-8",
+            )
+
+            scores = lib_grading._grade_git_rescue_recovery_windows_safe(str(workspace))
+
+        self.assertTrue(all(score == 1.0 for score in scores.values()))
+
+
 if __name__ == "__main__":
     unittest.main()

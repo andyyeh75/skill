@@ -9,6 +9,8 @@ import json
 import logging
 import os
 import re
+import shlex
+import subprocess
 import tempfile
 import time
 from collections import Counter
@@ -245,6 +247,143 @@ def _grade_automated(
         breakdown=_normalize_score_dict(scores),
         notes="",
     )
+
+
+def _grade_git_rescue_recovery_windows_safe(workspace_path: str) -> Dict[str, float]:
+    """Grade git rescue commands without POSIX shell or ``/bin/bash`` support."""
+    scores: Dict[str, float] = {
+        "file_created": 0.0,
+        "git_only_commands": 0.0,
+        "executes_successfully": 0.0,
+        "feature_branch_created": 0.0,
+        "main_reset_correctly": 0.0,
+        "commits_preserved_on_feature": 0.0,
+        "working_tree_clean": 0.0,
+    }
+
+    workspace = Path(workspace_path)
+    recovery_file = workspace / "recovery.sh"
+    if not recovery_file.exists():
+        return scores
+    scores["file_created"] = 1.0
+
+    try:
+        commands = [
+            line.strip()
+            for line in recovery_file.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+    except OSError:
+        return scores
+    if not commands:
+        return scores
+    if all(command.startswith("git ") for command in commands):
+        scores["git_only_commands"] = 1.0
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        repo = Path(temp_dir) / "repo"
+        repo.mkdir()
+
+        def run_git(*args: str) -> subprocess.CompletedProcess[str] | None:
+            try:
+                return subprocess.run(
+                    ["git", *args],
+                    cwd=repo,
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                return None
+
+        setup_commands = [
+            ("init",),
+            ("branch", "-M", "main"),
+            ("config", "user.name", "PinchBench"),
+            ("config", "user.email", "bench@example.com"),
+            ("config", "commit.gpgsign", "false"),
+        ]
+        for args in setup_commands:
+            result = run_git(*args)
+            if result is None or result.returncode != 0:
+                return scores
+
+        try:
+            (repo / "app.txt").write_text("base\n", encoding="utf-8")
+        except OSError:
+            return scores
+        for args in (("add", "app.txt"), ("commit", "-m", "base commit")):
+            result = run_git(*args)
+            if result is None or result.returncode != 0:
+                return scores
+
+        for change, message in (
+            ("feature change 1\n", "feature commit 1"),
+            ("feature change 2\n", "feature commit 2"),
+        ):
+            try:
+                with (repo / "app.txt").open("a", encoding="utf-8") as app_file:
+                    app_file.write(change)
+            except OSError:
+                return scores
+            for args in (("add", "app.txt"), ("commit", "-m", message)):
+                result = run_git(*args)
+                if result is None or result.returncode != 0:
+                    return scores
+
+        before_main = run_git("rev-parse", "main")
+        base_commit = run_git("rev-parse", "HEAD~2")
+        misplaced_commits = run_git("rev-list", "--reverse", "HEAD~2..HEAD")
+        original_messages = run_git("log", "--format=%s", "--reverse", "HEAD~2..HEAD")
+        if any(result is None or result.returncode != 0 for result in (
+            before_main, base_commit, misplaced_commits, original_messages
+        )):
+            return scores
+        assert before_main is not None
+        assert base_commit is not None
+        assert misplaced_commits is not None
+        assert original_messages is not None
+        if (
+            not before_main.stdout.strip()
+            or not base_commit.stdout.strip()
+            or len(misplaced_commits.stdout.splitlines()) != 2
+        ):
+            return scores
+
+        for command in commands:
+            try:
+                args = shlex.split(command)
+            except ValueError:
+                return scores
+            if not args or args[0] != "git":
+                return scores
+            result = run_git(*args[1:])
+            if result is None or result.returncode != 0:
+                return scores
+        scores["executes_successfully"] = 1.0
+
+        feature_commit = run_git("rev-parse", "feature/login-fix")
+        if feature_commit is not None and feature_commit.returncode == 0:
+            scores["feature_branch_created"] = 1.0
+
+        new_main = run_git("rev-parse", "main")
+        if new_main is not None and new_main.returncode == 0:
+            if new_main.stdout.strip() == base_commit.stdout.strip():
+                scores["main_reset_correctly"] = 1.0
+
+        feature_log = run_git("log", "--format=%s", "--reverse", "feature/login-fix")
+        if feature_log is not None and feature_log.returncode == 0:
+            feature_messages = feature_log.stdout.strip().splitlines()
+            expected_messages = original_messages.stdout.strip().splitlines()
+            if len(feature_messages) >= 2 and feature_messages[-2:] == expected_messages:
+                scores["commits_preserved_on_feature"] = 1.0
+
+        status = run_git("status", "--porcelain")
+        if status is not None and status.returncode == 0 and not status.stdout.strip():
+            scores["working_tree_clean"] = 1.0
+
+    return scores
 
 
 @contextmanager
