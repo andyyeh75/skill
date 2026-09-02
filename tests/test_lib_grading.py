@@ -180,6 +180,37 @@ class WorkspaceFilesForJudgeTests(unittest.TestCase):
         self.assertIn("TAIL_MARKER", content)
         self.assertIn(long_content, content)
 
+    def test_workspace_evidence_has_per_file_and_total_limits(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            (workspace / "first.txt").write_text("A" * 90, encoding="utf-8")
+            (workspace / "second.txt").write_text("B" * 90, encoding="utf-8")
+
+            with patch.object(lib_grading, "_JUDGE_EVIDENCE_MAX_FILE_CHARS", 60), patch.object(
+                lib_grading, "_JUDGE_EVIDENCE_MAX_TOTAL_CHARS", 140
+            ):
+                content = _read_workspace_files(str(workspace))
+
+        self.assertLessEqual(len(content), 140)
+        self.assertIn("[Judge evidence truncated to fit context]", content)
+
+    def test_video_transcript_evidence_excludes_generated_intermediates(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            (workspace / "transcript.txt").write_text("clean transcript", encoding="utf-8")
+            (workspace / "video_summary.md").write_text("structured summary", encoding="utf-8")
+            (workspace / "video.info.json").write_text("metadata artifact", encoding="utf-8")
+            (workspace / "video.en.vtt").write_text("subtitle artifact", encoding="utf-8")
+
+            content = _read_workspace_files(
+                str(workspace), task_id="task_video_transcript_extraction"
+            )
+
+        self.assertIn("clean transcript", content)
+        self.assertIn("structured summary", content)
+        self.assertNotIn("metadata artifact", content)
+        self.assertNotIn("subtitle artifact", content)
+
     def test_compute_cache_key_changes_when_workspace_content_changes(self) -> None:
         first_key = _compute_cache_key(
             "task_report",

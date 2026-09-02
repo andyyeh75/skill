@@ -30,6 +30,20 @@ DEFAULT_JUDGE_MODEL = "openrouter/anthropic/claude-haiku-4.5"
 DEFAULT_JUDGE_AGENT_PREFIX = "bench-judge"
 DEFAULT_JUDGE_TIMEOUT_SECONDS = 300
 
+# Bound workspace evidence independently of judge provider so generated
+# artifacts cannot consume the model context or grading process memory.
+_JUDGE_EVIDENCE_MAX_FILE_CHARS = 64_000
+_JUDGE_EVIDENCE_MAX_TOTAL_CHARS = 192_000
+_TASK_WORKSPACE_EVIDENCE_FILES = {
+    # yt-dlp can create large metadata and subtitle files. The rubric evaluates
+    # the cleaned transcript and structured summary, not those intermediates.
+    "task_video_transcript_extraction": {
+        "transcript.txt",
+        "video_summary.md",
+    },
+}
+_JUDGE_EVIDENCE_TRUNCATION_MARKER = "\n[Judge evidence truncated to fit context]"
+
 # Judge result cache: maps cache_key -> GradeResult dict
 # Cache key = hash of (task_id, transcript_summary, rubric, judge_model, workspace_content)
 _judge_cache: Dict[str, Dict[str, Any]] = {}
@@ -506,7 +520,9 @@ def _grade_llm_judge(
             "   [VERBOSE] Transcript summary for judge (first 1000 chars):\n%s",
             transcript_summary[:1000],
         )
-    workspace_content = _read_workspace_files(execution_result.get("workspace", ""))
+    workspace_content = _read_workspace_files(
+        execution_result.get("workspace", ""), task_id=task.task_id
+    )
     if verbose and workspace_content:
         logger.info(
             "   [VERBOSE] Workspace files passed to judge (first 500 chars):\n%s",
@@ -765,8 +781,8 @@ def _summarize_transcript(transcript: List[Dict[str, Any]]) -> str:
     return "\n".join(summary_parts)
 
 
-def _read_workspace_files(workspace_path: str) -> str:
-    """Read user-created text files from workspace to provide grading context."""
+def _read_workspace_files(workspace_path: str, *, task_id: str = "") -> str:
+    """Read bounded, relevant user-created text files for grading context."""
     if not workspace_path:
         return ""
     workspace = Path(workspace_path)
@@ -782,7 +798,9 @@ def _read_workspace_files(workspace_path: str) -> str:
         "AGENTS.md",
     }
     skip_dirs = {".git", ".openclaw", "__pycache__", "node_modules", "skills"}
+    evidence_files = _TASK_WORKSPACE_EVIDENCE_FILES.get(task_id)
     file_contents: List[str] = []
+    total_chars = 0
     for f in sorted(workspace.rglob("*")):
         if not f.is_file():
             continue
@@ -792,11 +810,33 @@ def _read_workspace_files(workspace_path: str) -> str:
             continue
         if f.name in skip_names:
             continue
+        if evidence_files is not None and rel.as_posix() not in evidence_files:
+            continue
         section_header = f"### File: {rel}\n"
+        separator = "\n\n" if file_contents else ""
+        remaining = (
+            _JUDGE_EVIDENCE_MAX_TOTAL_CHARS
+            - total_chars
+            - len(separator)
+            - len(section_header)
+        )
+        if remaining <= 0:
+            break
+        content_limit = min(_JUDGE_EVIDENCE_MAX_FILE_CHARS, remaining)
         try:
-            content = f.read_text(encoding="utf-8")
+            with f.open(encoding="utf-8") as text_file:
+                content = text_file.read(content_limit + 1)
+            if len(content) > content_limit:
+                if content_limit > len(_JUDGE_EVIDENCE_TRUNCATION_MARKER):
+                    content = (
+                        content[: content_limit - len(_JUDGE_EVIDENCE_TRUNCATION_MARKER)]
+                        + _JUDGE_EVIDENCE_TRUNCATION_MARKER
+                    )
+                else:
+                    content = content[:content_limit]
             section = f"{section_header}{content}"
             file_contents.append(section)
+            total_chars += len(separator) + len(section)
         except (OSError, UnicodeDecodeError):
             pass
     return "\n\n".join(file_contents)
