@@ -49,13 +49,26 @@ class CustomEndpointAgentConfigurationTests(unittest.TestCase):
             root_config_result = subprocess.CompletedProcess(
                 ["openclaw", "config", "set"], 0, stdout="", stderr=""
             )
+            root_models_result = subprocess.CompletedProcess(
+                ["openclaw", "config", "get"], 0, stdout="[]", stderr=""
+            )
+            root_models_update_result = subprocess.CompletedProcess(
+                ["openclaw", "config", "set"], 0, stdout="", stderr=""
+            )
             auth_result = subprocess.CompletedProcess(
                 ["openclaw", "models", "auth", "paste-api-key"], 0, stdout="", stderr=""
             )
 
             with patch(
                 "lib_agent.subprocess.run",
-                side_effect=[list_result, create_result, root_config_result, auth_result],
+                side_effect=[
+                    list_result,
+                    create_result,
+                    root_config_result,
+                    root_models_result,
+                    root_models_update_result,
+                    auth_result,
+                ],
             ) as run, patch(
                 "lib_agent._get_agent_store_dir", return_value=agent_store
             ), patch("lib_agent.Path.home", return_value=home):
@@ -70,7 +83,7 @@ class CustomEndpointAgentConfigurationTests(unittest.TestCase):
             models = json.loads((agent_store / "agent" / "models.json").read_text("utf-8"))
 
         self.assertTrue(created)
-        self.assertEqual(run.call_count, 4)
+        self.assertEqual(run.call_count, 6)
         self.assertEqual(models["defaultProvider"], "llama-cpp")
         self.assertEqual(models["defaultModel"], "qwen3.6-35b-a3b-mtp")
         provider = models["providers"]["llama-cpp"]
@@ -89,7 +102,13 @@ class CustomEndpointAgentConfigurationTests(unittest.TestCase):
                 "http://127.0.0.1:8088/v1",
             ],
         )
-        auth_call = run.call_args_list[3]
+        root_models_call = run.call_args_list[4]
+        self.assertEqual(
+            root_models_call.args[0][:4],
+            ["openclaw", "config", "set", "models.providers.llama-cpp.models"],
+        )
+        self.assertEqual(json.loads(root_models_call.args[0][4])[0]["contextWindow"], 200000)
+        auth_call = run.call_args_list[5]
         self.assertEqual(
             auth_call.args[0],
             [
@@ -117,6 +136,12 @@ class CustomEndpointAgentConfigurationTests(unittest.TestCase):
             root_config_result = subprocess.CompletedProcess(
                 ["openclaw", "config", "set"], 0, stdout="", stderr=""
             )
+            root_models_result = subprocess.CompletedProcess(
+                ["openclaw", "config", "get"], 0, stdout="[]", stderr=""
+            )
+            root_models_update_result = subprocess.CompletedProcess(
+                ["openclaw", "config", "set"], 0, stdout="", stderr=""
+            )
             auth_result = subprocess.CompletedProcess(
                 ["openclaw", "models", "auth", "paste-api-key"],
                 1,
@@ -126,7 +151,14 @@ class CustomEndpointAgentConfigurationTests(unittest.TestCase):
 
             with patch(
                 "lib_agent.subprocess.run",
-                side_effect=[list_result, create_result, root_config_result, auth_result],
+                side_effect=[
+                    list_result,
+                    create_result,
+                    root_config_result,
+                    root_models_result,
+                    root_models_update_result,
+                    auth_result,
+                ],
             ), patch(
                 "lib_agent._get_agent_store_dir", return_value=root / "agent-store"
             ), patch("lib_agent.Path.home", return_value=root / "home"):
