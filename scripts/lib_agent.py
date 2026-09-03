@@ -39,6 +39,9 @@ CUSTOM_ENDPOINT_CONTEXT_WINDOW = int(
     os.environ.get("PINCHBENCH_CUSTOM_CONTEXT_WINDOW", "200000")
 )
 CUSTOM_ENDPOINT_MAX_TOKENS = int(os.environ.get("PINCHBENCH_CUSTOM_MAX_TOKENS", "8192"))
+OPENCLAW_TOOL_RESULT_MAX_CHARS = os.environ.get(
+    "PINCHBENCH_OPENCLAW_TOOL_RESULT_MAX_CHARS"
+)
 
 # Valid thinking levels for OpenClaw reasoning depth
 VALID_THINKING_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh", "adaptive")
@@ -250,13 +253,14 @@ def ensure_agent_exists(
         logger.error("openclaw CLI not found while listing agents")
         return False
 
+    existing_agents: set[str] = set()
+    agent_recreated = False
     if list_result.returncode == 0:
         # Check for exact agent ID match — avoid substring false positives
         # (e.g. "bench-foo-4" matching "bench-foo-4-5" in the output).
         # Output format is "- <agent_id>" or "- <agent_id> (default)" per line.
         # OpenClaw normalizes colons to dashes in directory/display names, so
         # also check the normalized form.
-        existing_agents = set()
         for line in list_result.stdout.splitlines():
             line = line.strip()
             if line.startswith("- "):
@@ -273,50 +277,60 @@ def ensure_agent_exists(
                 and current_workspace.resolve() == workspace_dir.resolve()
             ):
                 logger.info("Agent %s already exists with correct workspace", agent_id)
-                return False
-            # Workspace is stale or unknown — delete and recreate
-            delete_name = normalized_id if normalized_id in existing_agents else agent_id
-            logger.info(
-                "Agent %s exists with stale workspace (%s != %s), recreating",
-                agent_id,
-                current_workspace,
-                workspace_dir,
-            )
-            subprocess.run(
-                ["openclaw", "agents", "delete", delete_name, "--force"],
+                # An unchanged workspace does not imply unchanged model
+                # configuration. Continue to refresh the endpoint contract.
+            else:
+                # Workspace is stale or unknown — delete and recreate.
+                delete_name = normalized_id if normalized_id in existing_agents else agent_id
+                logger.info(
+                    "Agent %s exists with stale workspace (%s != %s), recreating",
+                    agent_id,
+                    current_workspace,
+                    workspace_dir,
+                )
+                subprocess.run(
+                    ["openclaw", "agents", "delete", delete_name, "--force"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    shell=USE_SHELL,
+                )
+                agent_recreated = True
+
+    agent_exists = (
+        list_result.returncode == 0
+        and (agent_id.lower() in existing_agents or normalized_id in existing_agents)
+        and not agent_recreated
+    )
+    if not agent_exists:
+        logger.info("Creating OpenClaw agent %s", agent_id)
+        try:
+            create_result = subprocess.run(
+                [
+                    "openclaw",
+                    "agents",
+                    "add",
+                    agent_id,
+                    "--model",
+                    model_id,
+                    "--workspace",
+                    str(workspace_dir),
+                    "--non-interactive",
+                ],
                 capture_output=True,
                 text=True,
                 check=False,
-            shell=USE_SHELL,
+                shell=USE_SHELL,
             )
+        except FileNotFoundError:
+            logger.error("openclaw CLI not found while creating agent")
+            return False
 
-    logger.info("Creating OpenClaw agent %s", agent_id)
-    try:
-        create_result = subprocess.run(
-            [
-                "openclaw",
-                "agents",
-                "add",
-                agent_id,
-                "--model",
-                model_id,
-                "--workspace",
-                str(workspace_dir),
-                "--non-interactive",
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-            shell=USE_SHELL,
-        )
-    except FileNotFoundError:
-        logger.error("openclaw CLI not found while creating agent")
-        return False
-
-    if create_result.returncode != 0:
-        logger.warning(
-            "Agent creation returned %s: %s", create_result.returncode, create_result.stderr
-        )
+        if create_result.returncode != 0:
+            logger.warning(
+                "Agent creation returned %s: %s", create_result.returncode, create_result.stderr
+            )
+        agent_recreated = True
 
     # Configure models.json for the bench agent
     bench_agent_dir = _get_agent_store_dir(agent_id) / "agent"
@@ -365,6 +379,68 @@ def ensure_agent_exists(
             raise RuntimeError(
                 f"Failed to set root base URL for provider {provider_id}: "
                 f"{root_config_result.stderr.strip()}"
+            )
+
+        # The embedded OpenClaw runtime resolves its effective context window
+        # from the root provider registry, not solely from the isolated
+        # agent's models.json. Preserve any other models on this provider and
+        # merge this benchmark model's actual server contract into that list.
+        root_models_result = subprocess.run(
+            ["openclaw", "config", "get", f"models.providers.{provider_id}.models"],
+            capture_output=True,
+            text=True,
+            check=False,
+            shell=USE_SHELL,
+        )
+        if root_models_result.returncode != 0:
+            raise RuntimeError(
+                f"Failed to read root model registry for provider {provider_id}: "
+                f"{root_models_result.stderr.strip()}"
+            )
+        try:
+            root_models = json.loads(root_models_result.stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"Failed to parse root model registry for provider {provider_id}"
+            ) from exc
+        if not isinstance(root_models, list):
+            raise RuntimeError(
+                f"Root model registry for provider {provider_id} is not a list"
+            )
+
+        root_model_entry = {
+            "id": provider_model_id,
+            "name": model_id,
+            "reasoning": False,
+            "input": ["text"],
+            "contextWindow": CUSTOM_ENDPOINT_CONTEXT_WINDOW,
+            "maxTokens": CUSTOM_ENDPOINT_MAX_TOKENS,
+            "api": "openai-completions",
+        }
+        root_models = [
+            model
+            for model in root_models
+            if not isinstance(model, dict) or model.get("id") != provider_model_id
+        ]
+        root_models.append(root_model_entry)
+        root_models_update_result = subprocess.run(
+            [
+                "openclaw",
+                "config",
+                "set",
+                f"models.providers.{provider_id}.models",
+                json.dumps(root_models),
+                "--strict-json",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            shell=USE_SHELL,
+        )
+        if root_models_update_result.returncode != 0:
+            raise RuntimeError(
+                f"Failed to update root model registry for provider {provider_id}: "
+                f"{root_models_update_result.stderr.strip()}"
             )
 
         providers = data.setdefault("providers", {})
@@ -464,7 +540,69 @@ def ensure_agent_exists(
         except OSError as exc:
             logger.warning("Failed to delete sessions.json: %s", exc)
 
-    return True
+    if OPENCLAW_TOOL_RESULT_MAX_CHARS:
+        try:
+            tool_result_max_chars = int(OPENCLAW_TOOL_RESULT_MAX_CHARS)
+        except ValueError as exc:
+            raise ValueError(
+                "PINCHBENCH_OPENCLAW_TOOL_RESULT_MAX_CHARS must be a positive integer"
+            ) from exc
+        if tool_result_max_chars <= 0:
+            raise ValueError(
+                "PINCHBENCH_OPENCLAW_TOOL_RESULT_MAX_CHARS must be a positive integer"
+            )
+
+        agents_result = subprocess.run(
+            ["openclaw", "config", "get", "agents.list"],
+            capture_output=True,
+            text=True,
+            check=False,
+            shell=USE_SHELL,
+        )
+        if agents_result.returncode != 0:
+            raise RuntimeError(
+                "Failed to read OpenClaw agent configuration for context limits: "
+                f"{agents_result.stderr.strip()}"
+            )
+        try:
+            agents = json.loads(agents_result.stdout)
+            agent_index = next(
+                index
+                for index, configured_agent in enumerate(agents)
+                if configured_agent.get("id", "").lower()
+                in {agent_id.lower(), normalized_id}
+            )
+        except (json.JSONDecodeError, StopIteration, AttributeError) as exc:
+            raise RuntimeError(
+                f"Failed to locate OpenClaw agent {agent_id} for context limits"
+            ) from exc
+
+        context_limit_result = subprocess.run(
+            [
+                "openclaw",
+                "config",
+                "set",
+                f"agents.list[{agent_index}].contextLimits.toolResultMaxChars",
+                str(tool_result_max_chars),
+                "--strict-json",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            shell=USE_SHELL,
+        )
+        if context_limit_result.returncode != 0:
+            raise RuntimeError(
+                f"Failed to set tool-result limit for agent {agent_id}: "
+                f"{context_limit_result.stderr.strip()}"
+            )
+        logger.info(
+            "Configured OpenClaw toolResultMaxChars=%s for agent %s",
+            tool_result_max_chars,
+            agent_id,
+        )
+
+    return agent_recreated
 
 
 def cleanup_agent_sessions(agent_id: str) -> None:
