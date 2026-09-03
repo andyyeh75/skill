@@ -129,6 +129,7 @@ def post_stream(
     first_content_ns: int | None = None
     stream_end_ns: int | None = None
     usage: dict | None = None
+    timings: dict | None = None
     chunks: list[dict] = []
     sampler = ProcessCpuSampler(cpu_pid, cpu_sample_ms) if cpu_pid is not None else None
     if sampler:
@@ -148,15 +149,27 @@ def post_stream(
                 chunks.append({"at_ms": (now - started) / 1_000_000, "event": event})
                 if event.get("usage"):
                     usage = event["usage"]
+                if event.get("timings"):
+                    timings = event["timings"]
                 for choice in event.get("choices", []):
                     if (choice.get("delta") or {}).get("content") and first_content_ns is None:
                         first_content_ns = now
     finally:
         cpu_telemetry = sampler.stop() if sampler else None
-    if first_content_ns is None or stream_end_ns is None or usage is None:
-        raise RuntimeError("incomplete stream: content, [DONE], or usage was absent")
-    completion_tokens = usage["completion_tokens"]
-    decode_ms = (stream_end_ns - first_content_ns) / 1_000_000
+    if first_content_ns is None or stream_end_ns is None or usage is None or timings is None:
+        raise RuntimeError("incomplete stream: content, [DONE], usage, or llama.cpp timings was absent")
+    try:
+        completion_tokens = int(usage["completion_tokens"])
+        decode_ms = float(timings["predicted_ms"])
+        predicted_tokens = int(timings["predicted_n"])
+        server_tps = float(timings["predicted_per_second"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError(f"invalid llama.cpp timing payload: {timings!r}") from exc
+    if predicted_tokens != completion_tokens:
+        raise RuntimeError(
+            "llama.cpp timing token count does not match streamed completion usage: "
+            f"predicted_n={predicted_tokens!r}, completion_tokens={completion_tokens!r}"
+        )
     if completion_tokens <= 0 or decode_ms <= 0:
         raise RuntimeError("invalid completion token count or decode duration")
     result = {
@@ -165,7 +178,8 @@ def post_stream(
         "ttft_ms": (first_content_ns - started) / 1_000_000,
         "decode_ms": decode_ms,
         "duration_ms": (stream_end_ns - started) / 1_000_000,
-        "tps": completion_tokens / (decode_ms / 1000),
+        "tps": server_tps,
+        "client_post_first_content_ms": (stream_end_ns - first_content_ns) / 1_000_000,
     }
     if cpu_telemetry is not None:
         result["server_cpu"] = cpu_telemetry
@@ -199,7 +213,9 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     request_url = f"{args.base_url.rstrip('/')}/chat/completions"
     measurements: dict[str, list[dict]] = {name: [] for name, _ in scenarios}
-    failures: dict[str, list[dict]] = {name: [] for name, _ in scenarios}
+    failures: dict[str, dict[str, list[dict]]] = {
+        name: {"warmup": [], "measurement": []} for name, _ in scenarios
+    }
 
     for phase, count in (("warmup", args.warmup_runs), ("measurement", args.runs)):
         for run_number in range(1, count + 1):
@@ -238,23 +254,29 @@ def main() -> None:
                         measurements[name].append(result)
                 except (RuntimeError, urllib.error.URLError, TimeoutError) as exc:
                     failure = {"run_number": run_number, "phase": phase, "error": str(exc)}
-                    failures[name].append(failure)
+                    failures[name][phase].append(failure)
                     print(f"FAILED {phase} {name} run {run_number}/{count}: {exc}", flush=True)
 
     output_scenarios = []
     for name, target_words in scenarios:
         successful = measurements[name]
         if not successful:
-            raise RuntimeError(f"all measured {name} runs failed: {failures[name]}")
+            raise RuntimeError(
+                f"all measured {name} runs failed: {failures[name]['measurement']}"
+            )
         scenario = {
             "name": name,
             "target_input_words": target_words,
-            "failed_runs": len(failures[name]),
+            "failed_runs": len(failures[name]["measurement"]),
+            "warmup_failed_runs": len(failures[name]["warmup"]),
             "input_tokens": stats([item["input_tokens"] for item in successful]),
             "output_tokens": stats([item["output_tokens"] for item in successful]),
             "ttft_ms": stats([item["ttft_ms"] for item in successful]),
             "tps": stats([item["tps"] for item in successful]),
             "duration_ms": stats([item["duration_ms"] for item in successful]),
+            "client_post_first_content_ms": stats(
+                [item["client_post_first_content_ms"] for item in successful]
+            ),
             "runs": successful,
             "failures": failures[name],
         }
@@ -271,7 +293,7 @@ def main() -> None:
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "measurement_method": {
             "ttft": "client monotonic time from POST start to first streamed content token",
-            "tps": "completion tokens divided by client monotonic time from first content token to [DONE]",
+            "tps": "llama.cpp server-reported predicted_per_second over its complete predicted-token interval",
             "cache_control": "unique request identifier at prompt start prevents prefix-cache reuse",
             "decode_control": "ignore_eos=true requests a fixed maximum-token decode window",
             "cpu_telemetry": "optional server host-PID /proc user+system CPU sampling; excludes benchmark client CPU",

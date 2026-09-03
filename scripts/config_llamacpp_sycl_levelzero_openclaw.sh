@@ -8,7 +8,7 @@
 # Useful overrides: LLAMA_SYCL_RELEASE_VARIANT, LLAMA_SYCL_RELEASE_DIR,
 # ONEAPI_SYCL_RUNTIME_ROOT, LLAMA_SYCL_PORT, LLAMA_SYCL_CTX_SIZE,
 # LLAMA_SYCL_DEVICE_SELECTOR, LLAMA_SYCL_THREADS, LLAMA_SYCL_GPU_LAYERS, and
-# LLAMA_SYCL_CACHE_RAM.  The defaults retain the prior benchmark configuration.
+# LLAMA_SYCL_CACHE_RAM_MIB.  LLAMA_SYCL_CACHE_RAM remains a compatibility alias.
 
 configure_llamacpp_sycl_levelzero() {
     : "${workspace:?set workspace before configuring llama.cpp SYCL}"
@@ -42,7 +42,11 @@ configure_llamacpp_sycl_levelzero() {
     llama_sycl_threads=${LLAMA_SYCL_THREADS:-16}
     llama_sycl_threads_batch=${LLAMA_SYCL_THREADS_BATCH:-16}
     llama_sycl_gpu_layers=${LLAMA_SYCL_GPU_LAYERS:-all}
-    llama_sycl_cache_ram=${LLAMA_SYCL_CACHE_RAM:-8196}
+    llama_sycl_cache_ram=${LLAMA_SYCL_CACHE_RAM_MIB:-${LLAMA_SYCL_CACHE_RAM:-8192}}
+    [[ "$llama_sycl_cache_ram" =~ ^[0-9]+$ ]] || {
+        echo "LLAMA_SYCL_CACHE_RAM_MIB must be a non-negative integer MiB value" >&2
+        return 64
+    }
 
     llama_sycl_device_args=(
         "--device=${llama_sycl_card_node}"
@@ -72,10 +76,19 @@ configure_openclaw_sycl_pinchbench() {
     : "${pinchbench_max_tokens:?configure llama.cpp SYCL before OpenClaw}"
     : "${pinchbench_tool_result_max_chars:?set PinchBench tool-result limit first}"
 
-    openclaw_sycl_model_ref="sycl/${llama_sycl_server_alias}"
+    # The provider registry is process-global.  A unique provider keeps two
+    # benchmark launches from redirecting one another's temporary endpoint.
+    openclaw_sycl_provider_id="sycl-llamacpp-${port}-${BASHPID}"
+    openclaw_sycl_model_ref="${openclaw_sycl_provider_id}/${llama_sycl_server_alias}"
     openclaw_sycl_base_url="http://127.0.0.1:${port}/v1"
     openclaw_sycl_api_key=${LLAMA_SYCL_OPENCLAW_API_KEY:-ollama-local}
+    openclaw_sycl_timeout_seconds=${LLAMA_SYCL_OPENCLAW_TIMEOUT_SECONDS:-1800}
+    [[ "$openclaw_sycl_timeout_seconds" =~ ^[1-9][0-9]*$ ]] || {
+        echo "LLAMA_SYCL_OPENCLAW_TIMEOUT_SECONDS must be a positive integer" >&2
+        return 64
+    }
     export PINCHBENCH_CUSTOM_CONTEXT_WINDOW="$ctx_size"
     export PINCHBENCH_CUSTOM_MAX_TOKENS="$pinchbench_max_tokens"
+    export PINCHBENCH_CUSTOM_TIMEOUT_SECONDS="$openclaw_sycl_timeout_seconds"
     export PINCHBENCH_OPENCLAW_TOOL_RESULT_MAX_CHARS="$pinchbench_tool_result_max_chars"
 }
