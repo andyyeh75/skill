@@ -46,6 +46,9 @@ class CustomEndpointAgentConfigurationTests(unittest.TestCase):
             create_result = subprocess.CompletedProcess(
                 ["openclaw", "agents", "add"], 0, stdout="", stderr=""
             )
+            root_provider_result = subprocess.CompletedProcess(
+                ["openclaw", "config", "get"], 0, stdout="{}", stderr=""
+            )
             root_config_result = subprocess.CompletedProcess(
                 ["openclaw", "config", "set"], 0, stdout="", stderr=""
             )
@@ -64,6 +67,7 @@ class CustomEndpointAgentConfigurationTests(unittest.TestCase):
                 side_effect=[
                     list_result,
                     create_result,
+                    root_provider_result,
                     root_config_result,
                     root_models_result,
                     root_models_update_result,
@@ -83,7 +87,7 @@ class CustomEndpointAgentConfigurationTests(unittest.TestCase):
             models = json.loads((agent_store / "agent" / "models.json").read_text("utf-8"))
 
         self.assertTrue(created)
-        self.assertEqual(run.call_count, 6)
+        self.assertEqual(run.call_count, 7)
         self.assertEqual(models["defaultProvider"], "llama-cpp")
         self.assertEqual(models["defaultModel"], "qwen3.6-35b-a3b-mtp")
         provider = models["providers"]["llama-cpp"]
@@ -91,7 +95,7 @@ class CustomEndpointAgentConfigurationTests(unittest.TestCase):
         self.assertEqual(provider["apiKey"], "local-key")
         self.assertEqual(provider["models"][0]["id"], "qwen3.6-35b-a3b-mtp")
         self.assertEqual(provider["models"][0]["name"], "llama-cpp/qwen3.6-35b-a3b-mtp")
-        root_config_call = run.call_args_list[2]
+        root_config_call = run.call_args_list[3]
         self.assertEqual(
             root_config_call.args[0],
             [
@@ -102,13 +106,13 @@ class CustomEndpointAgentConfigurationTests(unittest.TestCase):
                 "http://127.0.0.1:8088/v1",
             ],
         )
-        root_models_call = run.call_args_list[4]
+        root_models_call = run.call_args_list[5]
         self.assertEqual(
             root_models_call.args[0][:4],
             ["openclaw", "config", "set", "models.providers.llama-cpp.models"],
         )
         self.assertEqual(json.loads(root_models_call.args[0][4])[0]["contextWindow"], 200000)
-        auth_call = run.call_args_list[5]
+        auth_call = run.call_args_list[6]
         self.assertEqual(
             auth_call.args[0],
             [
@@ -133,6 +137,9 @@ class CustomEndpointAgentConfigurationTests(unittest.TestCase):
             create_result = subprocess.CompletedProcess(
                 ["openclaw", "agents", "add"], 0, stdout="", stderr=""
             )
+            root_provider_result = subprocess.CompletedProcess(
+                ["openclaw", "config", "get"], 0, stdout="{}", stderr=""
+            )
             root_config_result = subprocess.CompletedProcess(
                 ["openclaw", "config", "set"], 0, stdout="", stderr=""
             )
@@ -154,6 +161,7 @@ class CustomEndpointAgentConfigurationTests(unittest.TestCase):
                 side_effect=[
                     list_result,
                     create_result,
+                    root_provider_result,
                     root_config_result,
                     root_models_result,
                     root_models_update_result,

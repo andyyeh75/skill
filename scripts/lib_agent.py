@@ -39,6 +39,7 @@ CUSTOM_ENDPOINT_CONTEXT_WINDOW = int(
     os.environ.get("PINCHBENCH_CUSTOM_CONTEXT_WINDOW", "200000")
 )
 CUSTOM_ENDPOINT_MAX_TOKENS = int(os.environ.get("PINCHBENCH_CUSTOM_MAX_TOKENS", "8192"))
+CUSTOM_ENDPOINT_TIMEOUT_SECONDS = os.environ.get("PINCHBENCH_CUSTOM_TIMEOUT_SECONDS")
 OPENCLAW_TOOL_RESULT_MAX_CHARS = os.environ.get(
     "PINCHBENCH_OPENCLAW_TOOL_RESULT_MAX_CHARS"
 )
@@ -353,61 +354,6 @@ def ensure_agent_exists(
             provider_id = "custom"
             provider_model_id = model_id
 
-        # OpenClaw's embedded agent runtime resolves the endpoint from the
-        # root ``models.providers`` configuration.  Keep it in sync with the
-        # isolated agent's provider entry, or a stale root URL is used.
-        try:
-            root_config_result = subprocess.run(
-                [
-                    "openclaw",
-                    "config",
-                    "set",
-                    f"models.providers.{provider_id}.baseUrl",
-                    base_url,
-                ],
-                capture_output=True,
-                text=True,
-                check=False,
-                shell=USE_SHELL,
-            )
-        except FileNotFoundError as exc:
-            raise RuntimeError(
-                "openclaw CLI not found while synchronizing custom provider "
-                f"{provider_id}"
-            ) from exc
-        if root_config_result.returncode != 0:
-            raise RuntimeError(
-                f"Failed to set root base URL for provider {provider_id}: "
-                f"{root_config_result.stderr.strip()}"
-            )
-
-        # The embedded OpenClaw runtime resolves its effective context window
-        # from the root provider registry, not solely from the isolated
-        # agent's models.json. Preserve any other models on this provider and
-        # merge this benchmark model's actual server contract into that list.
-        root_models_result = subprocess.run(
-            ["openclaw", "config", "get", f"models.providers.{provider_id}.models"],
-            capture_output=True,
-            text=True,
-            check=False,
-            shell=USE_SHELL,
-        )
-        if root_models_result.returncode != 0:
-            raise RuntimeError(
-                f"Failed to read root model registry for provider {provider_id}: "
-                f"{root_models_result.stderr.strip()}"
-            )
-        try:
-            root_models = json.loads(root_models_result.stdout)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(
-                f"Failed to parse root model registry for provider {provider_id}"
-            ) from exc
-        if not isinstance(root_models, list):
-            raise RuntimeError(
-                f"Root model registry for provider {provider_id} is not a list"
-            )
-
         root_model_entry = {
             "id": provider_model_id,
             "name": model_id,
@@ -417,31 +363,173 @@ def ensure_agent_exists(
             "maxTokens": CUSTOM_ENDPOINT_MAX_TOKENS,
             "api": "openai-completions",
         }
-        root_models = [
-            model
-            for model in root_models
-            if not isinstance(model, dict) or model.get("id") != provider_model_id
-        ]
-        root_models.append(root_model_entry)
-        root_models_update_result = subprocess.run(
-            [
-                "openclaw",
-                "config",
-                "set",
-                f"models.providers.{provider_id}.models",
-                json.dumps(root_models),
-                "--strict-json",
-            ],
+        custom_endpoint_timeout_seconds: int | None = None
+        if CUSTOM_ENDPOINT_TIMEOUT_SECONDS is not None:
+            try:
+                custom_endpoint_timeout_seconds = int(CUSTOM_ENDPOINT_TIMEOUT_SECONDS)
+            except ValueError as exc:
+                raise ValueError(
+                    "PINCHBENCH_CUSTOM_TIMEOUT_SECONDS must be a positive integer"
+                ) from exc
+            if custom_endpoint_timeout_seconds <= 0:
+                raise ValueError(
+                    "PINCHBENCH_CUSTOM_TIMEOUT_SECONDS must be a positive integer"
+                )
+
+        # OpenClaw validates a custom provider as a complete object: a newly
+        # created provider cannot be populated one nested field at a time.
+        # Check whether the provider already exists so existing registrations
+        # retain sibling models and credentials while a new isolated benchmark
+        # provider is written atomically.
+        root_provider_lookup = subprocess.run(
+            ["openclaw", "config", "get", f"models.providers.{provider_id}"],
             capture_output=True,
             text=True,
             check=False,
             shell=USE_SHELL,
         )
-        if root_models_update_result.returncode != 0:
+        if root_provider_lookup.returncode == 0:
+            root_provider_exists = True
+        elif "Config path not found" in root_provider_lookup.stderr:
+            root_provider_exists = False
+        else:
             raise RuntimeError(
-                f"Failed to update root model registry for provider {provider_id}: "
-                f"{root_models_update_result.stderr.strip()}"
+                f"Failed to inspect root provider {provider_id}: "
+                f"{root_provider_lookup.stderr.strip()}"
             )
+
+        if not root_provider_exists:
+            new_root_provider: dict[str, Any] = {
+                "baseUrl": base_url,
+                "api": "openai-completions",
+                "models": [root_model_entry],
+            }
+            if custom_endpoint_timeout_seconds is not None:
+                new_root_provider["timeoutSeconds"] = custom_endpoint_timeout_seconds
+            new_provider_result = subprocess.run(
+                [
+                    "openclaw",
+                    "config",
+                    "set",
+                    f"models.providers.{provider_id}",
+                    json.dumps(new_root_provider),
+                    "--strict-json",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                shell=USE_SHELL,
+            )
+            if new_provider_result.returncode != 0:
+                raise RuntimeError(
+                    f"Failed to create root provider {provider_id}: "
+                    f"{new_provider_result.stderr.strip()}"
+                )
+        else:
+            # The embedded OpenClaw runtime resolves the endpoint from the
+            # root ``models.providers`` configuration.  Keep it in sync with
+            # the isolated agent's provider entry, or a stale root URL is used.
+            try:
+                root_config_result = subprocess.run(
+                    [
+                        "openclaw",
+                        "config",
+                        "set",
+                        f"models.providers.{provider_id}.baseUrl",
+                        base_url,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    shell=USE_SHELL,
+                )
+            except FileNotFoundError as exc:
+                raise RuntimeError(
+                    "openclaw CLI not found while synchronizing custom provider "
+                    f"{provider_id}"
+                ) from exc
+            if root_config_result.returncode != 0:
+                raise RuntimeError(
+                    f"Failed to set root base URL for provider {provider_id}: "
+                    f"{root_config_result.stderr.strip()}"
+                )
+
+            if custom_endpoint_timeout_seconds is not None:
+                root_timeout_result = subprocess.run(
+                    [
+                        "openclaw",
+                        "config",
+                        "set",
+                        f"models.providers.{provider_id}.timeoutSeconds",
+                        str(custom_endpoint_timeout_seconds),
+                        "--strict-json",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    shell=USE_SHELL,
+                )
+                if root_timeout_result.returncode != 0:
+                    raise RuntimeError(
+                        f"Failed to set root timeout for provider {provider_id}: "
+                        f"{root_timeout_result.stderr.strip()}"
+                    )
+
+            # The embedded OpenClaw runtime resolves its effective context
+            # window from the root provider registry, not solely from the
+            # isolated agent's models.json. Preserve any other models on this
+            # provider and merge this benchmark model's actual server contract.
+            root_models_result = subprocess.run(
+                ["openclaw", "config", "get", f"models.providers.{provider_id}.models"],
+                capture_output=True,
+                text=True,
+                check=False,
+                shell=USE_SHELL,
+            )
+            if root_models_result.returncode != 0:
+                raise RuntimeError(
+                    f"Failed to read root model registry for provider {provider_id}: "
+                    f"{root_models_result.stderr.strip()}"
+                )
+            try:
+                root_models = json.loads(root_models_result.stdout)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(
+                    f"Failed to parse root model registry for provider {provider_id}"
+                ) from exc
+            if not isinstance(root_models, list):
+                raise RuntimeError(
+                    f"Root model registry for provider {provider_id} is not a list"
+                )
+
+            root_models = [
+                model
+                for model in root_models
+                if not isinstance(model, dict) or model.get("id") != provider_model_id
+            ]
+            root_models.append(root_model_entry)
+            root_models_update_result = subprocess.run(
+                [
+                    "openclaw",
+                    "config",
+                    "set",
+                    f"models.providers.{provider_id}.models",
+                    json.dumps(root_models),
+                    "--strict-json",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                shell=USE_SHELL,
+            )
+            if root_models_update_result.returncode != 0:
+                raise RuntimeError(
+                    f"Failed to update root model registry for provider {provider_id}: "
+                    f"{root_models_update_result.stderr.strip()}"
+                )
+
+        # The isolated agent uses the same resolved model contract as the root
+        # registry.  Its auth store is maintained separately below.
 
         providers = data.setdefault("providers", {})
         providers[provider_id] = {

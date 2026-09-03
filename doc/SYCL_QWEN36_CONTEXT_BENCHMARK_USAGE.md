@@ -5,7 +5,7 @@
 - No `--suite`: streaming context microbenchmark with TTFT, decode TPS, and optional server CPU telemetry.
 - `--suite`: PinchBench execution and GNAI judging against the same llama.cpp server.
 
-The launcher uses the official b10756 SYCL FP16 package by default, a compatible oneAPI 2025.3 runtime, `level_zero:0`, `--gpu-layers all`, 16 CPU threads, a 98,304-token context, and `--cache-ram 8196` MiB. It does not enable persistent disk KV caching.
+The launcher uses the official b10756 SYCL FP16 package by default, a compatible oneAPI 2025.3 runtime, `level_zero:0`, `--gpu-layers all`, 16 CPU threads, a 98,304-token context, and `--cache-ram 8192` MiB. It does not enable persistent disk KV caching.
 
 ## Prerequisites
 
@@ -26,7 +26,7 @@ ss -ltnH 'sport = :8090'
 
 ## Streaming context benchmark
 
-This measures client-observed time-to-first-token (TTFT) and decode TPS for short and long prompts. The measurement tool adds a unique identifier at the beginning of every prompt to avoid prompt-prefix cache reuse.
+This measures client-observed time-to-first-token (TTFT) and llama.cpp server-reported decode TPS for short and long prompts. The measurement tool adds a unique identifier at the beginning of every prompt to avoid prompt-prefix cache reuse.
 
 ```bash
 LLAMA_SYCL_CTX_SIZE=98304 \
@@ -44,10 +44,11 @@ LLAMA_SYCL_WARMUP_RUNS=1 \
 LLAMA_SYCL_SHORT_WORDS=32 \
 LLAMA_SYCL_LONG_WORDS=16384 \
 LLAMA_SYCL_MAX_TOKENS=128 \
+LLAMA_SYCL_CACHE_RAM_MIB=8192 \
 bash ./scripts/run_intel_sycl_qwen36_context_benchmark.sh outputs/sycl_context_fp32
 ```
 
-The output directory contains the device list (`sycl-ls.log`), health and model responses, the server log, per-run stream traces, and `bench-sycl-qwen36-35b-context.json`. Use the JSON's p50 TTFT and TPS values for the report; TPS is decode throughput after the first streamed content token, not generic agent throughput.
+The output directory contains `effective_config.env` (all resolved runtime values and server arguments), the device list (`sycl-ls.log`), health and model responses, the server log, per-run stream traces, and `bench-sycl-qwen36-35b-context.json`. Use the JSON's p50 TTFT and TPS values for the report; TPS comes from llama.cpp's full predicted-token timing interval, not generic agent throughput.
 
 ## PinchBench suites
 
@@ -95,12 +96,13 @@ For suite runs, the launcher applies these defaults:
 | Setting | Default | Purpose |
 | --- | ---: | --- |
 | `LLAMA_SYCL_CTX_SIZE` | 98,304 | llama.cpp server context window. |
+| `LLAMA_SYCL_CACHE_RAM_MIB` | 8,192 | In-RAM KV cache budget. `LLAMA_SYCL_CACHE_RAM` remains a compatibility alias. |
 | `LLAMA_SYCL_PINCHBENCH_MAX_TOKENS` | 16,384 | Custom-endpoint model output limit. |
 | `PINCHBENCH_OPENCLAW_TOOL_RESULT_MAX_CHARS` | 6,000 | Per-benchmark-agent cap for retained live tool output. |
 | `PINCHBENCH_TASK_WALL_CLOCK_SECONDS` | 600 | Hard execution ceiling per task. |
 | `PINCHBENCH_SCORE_ZERO_AFTER_SECONDS` | 600 | Force score zero when the ceiling is reached. |
 
-The script records the effective values in `pinchbench_config.txt`. It temporarily enables OpenClaw's mid-turn precheck during the benchmark so dense web-tool results can be truncated before they cause a tool-loop context overflow; the prior OpenClaw setting is restored when the script exits.
+The script records all resolved runtime values in `effective_config.env` and suite limits in `pinchbench_config.txt`. It temporarily enables OpenClaw's mid-turn precheck during the benchmark so dense web-tool results can be truncated before they cause a tool-loop context overflow. Each run uses an isolated temporary OpenClaw provider with a 1,800-second stream-idle watchdog; both that provider and the prior mid-turn setting are removed or restored when the script exits.
 
 To change a default for one invocation:
 
@@ -118,5 +120,6 @@ bash ./scripts/run_intel_sycl_qwen36_context_benchmark.sh \
 - `libsycl.so.8` missing: install or point `ONEAPI_SYCL_RUNTIME_ROOT` at the extracted oneAPI 2025.3 runtime expected by the official b10756 release.
 - Port already in use: stop the existing llama-server or set `LLAMA_SYCL_PORT` to a free port. Do not rely on an existing process at the default port.
 - Server fails before readiness: inspect `OUTPUT_DIR/server.log`, `OUTPUT_DIR/sycl-ls.log`, and `OUTPUT_DIR/endpoint-models.json`.
+- A failed launch: `OUTPUT_DIR/benchmark.status` records a terminal `failed` state and exit code; `effective_config.env` preserves the attempted configuration.
 - GNAI judge reports a missing API key: source the project-approved GNAI credential configuration before launching; do not substitute an OpenRouter key for a `gnai/...` judge.
 - A task reaches 600 seconds: this is a recorded hard cutoff and intentionally receives a score of zero. Its transcript and elapsed time remain in the results.

@@ -137,9 +137,11 @@ server_name="llama-sycl-qwen36-${port}-$$"
 server_log="$output_dir/server.log"
 status_file="$output_dir/benchmark.status"
 printf 'started %s\n' "$(date -u +%FT%TZ)" > "$status_file"
+status_finalized=false
 mid_turn_precheck_changed=false
 mid_turn_precheck_was_present=false
 mid_turn_precheck_original=''
+openclaw_provider_configured=false
 
 restore_mid_turn_precheck() {
     [[ "$mid_turn_precheck_changed" == true ]] || return 0
@@ -152,10 +154,69 @@ restore_mid_turn_precheck() {
     fi
 }
 
+restore_openclaw_provider() {
+    [[ "$openclaw_provider_configured" == true ]] || return 0
+    # The provider ID is unique to this launcher process.  Removing it avoids
+    # leaving a global OpenClaw endpoint that dies with this temporary server.
+    openclaw config unset "models.providers.${openclaw_sycl_provider_id}" \
+        >/dev/null 2>&1 || true
+}
+
+write_effective_config() {
+    local mode=$1
+    local binary_sha256 model_size_bytes model_mtime_utc arg_index
+    binary_sha256=$(sha256sum "$release_dir/llama-server" | awk '{print $1}')
+    model_size_bytes=$(stat -c '%s' "$model")
+    model_mtime_utc=$(stat -c '%y' "$model")
+    {
+        printf '# Resolved SYCL/Level Zero launcher configuration (Bash %q values).\n' "$mode"
+        printf 'mode=%q\n' "$mode"
+        printf 'container_image=%q\n' "$image"
+        printf 'release_variant=%q\n' "$release_variant"
+        printf 'release_dir=%q\n' "$release_dir"
+        printf 'llama_server_sha256=%q\n' "$binary_sha256"
+        printf 'oneapi_runtime_root=%q\n' "$oneapi_runtime_root"
+        printf 'oneapi_runtime_ld=%q\n' "$oneapi_runtime_ld"
+        printf 'model_path=%q\n' "$model"
+        printf 'model_size_bytes=%q\n' "$model_size_bytes"
+        printf 'model_mtime=%q\n' "$model_mtime_utc"
+        printf 'device_selector=%q\n' "$llama_sycl_device_selector"
+        printf 'card_node=%q\n' "$llama_sycl_card_node"
+        printf 'render_node=%q\n' "$llama_sycl_render_node"
+        printf 'server_alias=%q\n' "$llama_sycl_server_alias"
+        printf 'server_port=%q\n' "$port"
+        printf 'context_size=%q\n' "$ctx_size"
+        printf 'threads=%q\n' "$llama_sycl_threads"
+        printf 'threads_batch=%q\n' "$llama_sycl_threads_batch"
+        printf 'gpu_layers=%q\n' "$llama_sycl_gpu_layers"
+        printf 'cache_ram_mib=%q\n' "$llama_sycl_cache_ram"
+        for arg_index in "${!llama_sycl_server_args[@]}"; do
+            printf 'llama_server_argv[%s]=%q\n' "$arg_index" "${llama_sycl_server_args[$arg_index]}"
+        done
+        if [[ "$mode" == pinchbench ]]; then
+            printf 'suite=%q\n' "$suite"
+            printf 'openclaw_provider_id=%q\n' "$openclaw_sycl_provider_id"
+            printf 'openclaw_base_url=%q\n' "$openclaw_sycl_base_url"
+            printf 'openclaw_timeout_seconds=%q\n' "$openclaw_sycl_timeout_seconds"
+            printf 'pinchbench_runs=%q\n' "$pinchbench_runs"
+            printf 'pinchbench_max_tokens=%q\n' "$pinchbench_max_tokens"
+            printf 'tool_result_max_chars=%q\n' "$pinchbench_tool_result_max_chars"
+            printf 'task_wall_clock_seconds=%q\n' "$pinchbench_task_wall_clock_seconds"
+            printf 'score_zero_after_seconds=%q\n' "$pinchbench_score_zero_after_seconds"
+        fi
+    } > "$output_dir/effective_config.env"
+}
+
 cleanup() {
+    local exit_status=$?
+    if [[ "$status_finalized" != true ]]; then
+        printf 'failed %s exit=%s\n' "$(date -u +%FT%TZ)" "$exit_status" > "$status_file" || true
+    fi
+    restore_openclaw_provider
     restore_mid_turn_precheck
     docker logs "$server_name" >"$server_log" 2>&1 || true
     docker rm -f "$server_name" >/dev/null 2>&1 || true
+    return "$exit_status"
 }
 trap cleanup EXIT
 
@@ -203,6 +264,7 @@ if [[ -n "$suite" ]]; then
     # PinchBench's isolated OpenClaw agent receives the server's actual
     # context contract and its per-agent tool-result cap from this helper.
     configure_openclaw_sycl_pinchbench
+    openclaw_provider_configured=true
 
     # OpenClaw otherwise evaluates raw tool payloads in its tool-loop guard
     # before the agent-scoped result cap is projected into the prompt. Enable
@@ -225,6 +287,7 @@ if [[ -n "$suite" ]]; then
     fi
 
     mkdir -p "$output_dir/results"
+    write_effective_config pinchbench
     printf 'suite=%s\nruns=%s\ncontext_window=%s\nmax_tokens=%s\ntool_result_max_chars=%s\nmid_turn_precheck=true\ntask_wall_clock_seconds=%s\nscore_zero_after_seconds=%s\njudge=%s\n' \
         "$suite" "$pinchbench_runs" "$ctx_size" "$pinchbench_max_tokens" \
         "$pinchbench_tool_result_max_chars" "$pinchbench_task_wall_clock_seconds" \
@@ -245,16 +308,19 @@ if [[ -n "$suite" ]]; then
 
     printf 'completed %s mode=pinchbench suite=%s benchmark_exit=%s\n' \
         "$(date -u +%FT%TZ)" "$suite" "$benchmark_status" > "$status_file"
+    status_finalized=true
     exit "$benchmark_status"
 fi
 
+write_effective_config streaming
 python3 "$workspace/scripts/measure_llamacpp_context_streaming.py" \
     --base-url "http://127.0.0.1:${port}/v1" \
     --output-dir "$output_dir" --model "$llama_sycl_server_alias" \
     --backend sycl-level-zero \
-    --backend-args "official llama.cpp b10756 SYCL $release_variant; oneAPI 2025.3 runtime ABI on 2026.1 container; ${llama_sycl_device_selector}; GGML_SYCL_ENABLE_LEVEL_ZERO=1; --gpu-layers ${llama_sycl_gpu_layers}; --cache-ram ${llama_sycl_cache_ram}; MTP draft" \
+    --backend-args "official llama.cpp SYCL ${release_variant}; release_dir=${release_dir}; oneAPI_runtime=${oneapi_runtime_root}; image=${image}; ${llama_sycl_device_selector}; GGML_SYCL_ENABLE_LEVEL_ZERO=1; --threads ${llama_sycl_threads}; --threads-batch ${llama_sycl_threads_batch}; --gpu-layers ${llama_sycl_gpu_layers}; --cache-ram ${llama_sycl_cache_ram}; MTP draft" \
     --ctx-size "$ctx_size" --runs "$runs" --warmup-runs "$warmup_runs" \
     --short-input-words "$short_words" --long-input-words "$long_words" \
     --max-tokens "$max_tokens" --cpu-pid "$server_host_pid"
 
 printf 'completed %s\n' "$(date -u +%FT%TZ)" > "$status_file"
+status_finalized=true
