@@ -14,3 +14,11 @@ configure_openclaw_sycl_pinchbench
 [[ "$openclaw_sycl_model_ref" == "${openclaw_sycl_provider_id}/${llama_sycl_server_alias}" ]]
 [[ "$openclaw_sycl_timeout_seconds" == 1800 ]]
 [[ "$PINCHBENCH_CUSTOM_TIMEOUT_SECONDS" == 1800 ]]
+
+configure_openclaw_proxy_environment
+[[ "$HTTP_PROXY" == 'http://proxy-png.intel.com:911' ]]
+[[ "$HTTPS_PROXY" == 'http://proxy-png.intel.com:911' ]]
+[[ "$NO_PROXY" == 'localhost,127.0.0.1,10.0.0.0/8,192.168.0.0/16' ]]
+[[ "$http_proxy" == "$HTTP_PROXY" ]]
+[[ "$https_proxy" == "$HTTPS_PROXY" ]]
+[[ "$no_proxy" == "$NO_PROXY" ]]

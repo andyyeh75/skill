@@ -117,16 +117,26 @@ def prompt(target_words: int, request_id: str) -> str:
 
 
 def post_stream(
-    url: str, payload: dict, timeout: int, cpu_pid: int | None, cpu_sample_ms: int
+    url: str,
+    payload: dict,
+    timeout: int,
+    cpu_pid: int | None,
+    cpu_sample_ms: int,
+    api_key: str | None,
+    require_server_timings: bool,
 ) -> tuple[dict, list[dict]]:
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     request = urllib.request.Request(
         url,
         data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="POST",
     )
     started = time.perf_counter_ns()
     first_content_ns: int | None = None
+    last_content_ns: int | None = None
     stream_end_ns: int | None = None
     usage: dict | None = None
     timings: dict | None = None
@@ -152,33 +162,54 @@ def post_stream(
                 if event.get("timings"):
                     timings = event["timings"]
                 for choice in event.get("choices", []):
-                    if (choice.get("delta") or {}).get("content") and first_content_ns is None:
-                        first_content_ns = now
+                    if (choice.get("delta") or {}).get("content"):
+                        if first_content_ns is None:
+                            first_content_ns = now
+                        last_content_ns = now
     finally:
         cpu_telemetry = sampler.stop() if sampler else None
-    if first_content_ns is None or stream_end_ns is None or usage is None or timings is None:
-        raise RuntimeError("incomplete stream: content, [DONE], usage, or llama.cpp timings was absent")
+    if first_content_ns is None or last_content_ns is None or stream_end_ns is None or usage is None:
+        raise RuntimeError("incomplete stream: content, [DONE], or usage was absent")
     try:
         completion_tokens = int(usage["completion_tokens"])
-        decode_ms = float(timings["predicted_ms"])
-        predicted_tokens = int(timings["predicted_n"])
-        server_tps = float(timings["predicted_per_second"])
     except (KeyError, TypeError, ValueError) as exc:
-        raise RuntimeError(f"invalid llama.cpp timing payload: {timings!r}") from exc
-    if predicted_tokens != completion_tokens:
-        raise RuntimeError(
-            "llama.cpp timing token count does not match streamed completion usage: "
-            f"predicted_n={predicted_tokens!r}, completion_tokens={completion_tokens!r}"
-        )
-    if completion_tokens <= 0 or decode_ms <= 0:
-        raise RuntimeError("invalid completion token count or decode duration")
+        raise RuntimeError(f"invalid completion usage: {usage!r}") from exc
+    if completion_tokens <= 0:
+        raise RuntimeError("invalid completion token count")
+
+    client_decode_ms = (last_content_ns - first_content_ns) / 1_000_000
+    if client_decode_ms <= 0:
+        raise RuntimeError("stream contained fewer than two timestamp-distinguishable content events")
+    tps = completion_tokens / (client_decode_ms / 1000)
+    tps_source = "client completion_tokens / first-to-last streamed content interval"
+    decode_ms = client_decode_ms
+    if timings is not None:
+        try:
+            server_decode_ms = float(timings["predicted_ms"])
+            predicted_tokens = int(timings["predicted_n"])
+            server_tps = float(timings["predicted_per_second"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError(f"invalid llama.cpp timing payload: {timings!r}") from exc
+        if predicted_tokens != completion_tokens:
+            raise RuntimeError(
+                "llama.cpp timing token count does not match streamed completion usage: "
+                f"predicted_n={predicted_tokens!r}, completion_tokens={completion_tokens!r}"
+            )
+        if server_decode_ms <= 0:
+            raise RuntimeError("invalid llama.cpp decode duration")
+        decode_ms = server_decode_ms
+        tps = server_tps
+        tps_source = "llama.cpp server-reported predicted_per_second"
+    elif require_server_timings:
+        raise RuntimeError("llama.cpp timings were required but absent from the stream")
     result = {
         "input_tokens": usage["prompt_tokens"],
         "output_tokens": completion_tokens,
         "ttft_ms": (first_content_ns - started) / 1_000_000,
         "decode_ms": decode_ms,
         "duration_ms": (stream_end_ns - started) / 1_000_000,
-        "tps": server_tps,
+        "tps": tps,
+        "tps_source": tps_source,
         "client_post_first_content_ms": (stream_end_ns - first_content_ns) / 1_000_000,
     }
     if cpu_telemetry is not None:
@@ -191,23 +222,40 @@ def main() -> None:
     parser.add_argument("--base-url", default="http://127.0.0.1:8090/v1")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--model", required=True)
-    parser.add_argument("--backend", default="sycl-level-zero")
-    parser.add_argument("--backend-args", required=True)
-    parser.add_argument("--ctx-size", type=int, default=32768)
+    parser.add_argument("--backend", default="openai-compatible")
+    parser.add_argument("--backend-args", default="")
+    parser.add_argument("--ctx-size", type=int, default=256000)
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--warmup-runs", type=int, default=1)
     parser.add_argument("--short-input-words", type=int, default=32)
     parser.add_argument("--long-input-words", type=int, default=16384)
     parser.add_argument("--max-tokens", type=int, default=128)
     parser.add_argument("--timeout", type=int, default=1800)
+    parser.add_argument("--api-key", help="Optional OpenAI-compatible bearer token.")
+    parser.add_argument(
+        "--extra-body-json",
+        default="{}",
+        help="JSON object merged into every chat-completions request (for example chat_template_kwargs).",
+    )
+    parser.add_argument(
+        "--require-server-timings",
+        action="store_true",
+        help="Fail unless the SSE stream has llama.cpp timing fields.",
+    )
     parser.add_argument("--cpu-pid", type=int, help="Host PID of the server process to sample via /proc.")
     parser.add_argument("--cpu-sample-ms", type=int, default=200)
-    parser.add_argument("--output-filename", default="bench-sycl-qwen36-35b-context.json")
+    parser.add_argument("--output-filename", default="context-streaming-benchmark.json")
     args = parser.parse_args()
     if args.runs < 1 or args.warmup_runs < 0:
         parser.error("runs must be >= 1 and warmup-runs must be >= 0")
     if args.long_input_words + args.max_tokens >= args.ctx_size:
         parser.error("long input target plus output budget must be smaller than ctx-size")
+    try:
+        extra_body = json.loads(args.extra_body_json)
+    except json.JSONDecodeError as exc:
+        parser.error(f"--extra-body-json must be valid JSON: {exc}")
+    if not isinstance(extra_body, dict):
+        parser.error("--extra-body-json must be a JSON object")
 
     scenarios = (("context-short", args.short_input_words), ("context-long", args.long_input_words))
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -234,10 +282,12 @@ def main() -> None:
                     "stream": True,
                     "stream_options": {"include_usage": True},
                 }
+                payload.update(extra_body)
                 print(f"starting {phase} {name} run {run_number}/{count}", flush=True)
                 try:
                     result, chunks = post_stream(
-                        request_url, payload, args.timeout, args.cpu_pid, args.cpu_sample_ms
+                        request_url, payload, args.timeout, args.cpu_pid, args.cpu_sample_ms,
+                        args.api_key, args.require_server_timings,
                     )
                     (args.output_dir / f"{phase}-{name}-{run_number:02d}.jsonl").write_text(
                         "\n".join(json.dumps(chunk) for chunk in chunks) + "\n"
@@ -293,14 +343,14 @@ def main() -> None:
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "measurement_method": {
             "ttft": "client monotonic time from POST start to first streamed content token",
-            "tps": "llama.cpp server-reported predicted_per_second over its complete predicted-token interval",
+            "tps": "llama.cpp server-reported predicted_per_second when present; otherwise client completion_tokens divided by the first-to-last streamed-content interval",
             "cache_control": "unique request identifier at prompt start prevents prefix-cache reuse",
             "decode_control": "ignore_eos=true requests a fixed maximum-token decode window",
             "cpu_telemetry": "optional server host-PID /proc user+system CPU sampling; excludes benchmark client CPU",
         },
         "models": [{"model": args.model, "config": {"measurement_runs": args.runs, "warmup_runs": args.warmup_runs}, "results": [{
             "backend": args.backend, "backend_args": args.backend_args, "ctx_size": args.ctx_size,
-            "recipe": "llamacpp-native-sycl-level-zero", "scenarios": output_scenarios,
+            "recipe": "openai-compatible-streaming-context", "scenarios": output_scenarios,
         }]}],
     }
     (args.output_dir / args.output_filename).write_text(json.dumps(output, indent=2) + "\n")
