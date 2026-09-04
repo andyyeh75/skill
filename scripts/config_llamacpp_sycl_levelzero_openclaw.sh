@@ -92,3 +92,14 @@ configure_openclaw_sycl_pinchbench() {
     export PINCHBENCH_CUSTOM_TIMEOUT_SECONDS="$openclaw_sycl_timeout_seconds"
     export PINCHBENCH_OPENCLAW_TOOL_RESULT_MAX_CHARS="$pinchbench_tool_result_max_chars"
 }
+
+configure_openclaw_proxy_environment() {
+    # PinchBench's embedded OpenClaw agents inherit this launcher's process
+    # environment.  Keep local llama.cpp traffic out of the corporate proxy.
+    export HTTP_PROXY='http://proxy-png.intel.com:911'
+    export HTTPS_PROXY='http://proxy-png.intel.com:911'
+    export NO_PROXY='localhost,127.0.0.1,10.0.0.0/8,192.168.0.0/16'
+    export http_proxy="$HTTP_PROXY"
+    export https_proxy="$HTTPS_PROXY"
+    export no_proxy="$NO_PROXY"
+}

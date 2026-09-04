@@ -91,6 +91,7 @@ workspace=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 output_dir=$(cd "$(dirname "$output_arg")" && pwd)/$(basename "$output_arg")
 source "$workspace/scripts/config_llamacpp_sycl_levelzero_openclaw.sh"
 configure_llamacpp_sycl_levelzero
+configure_openclaw_proxy_environment
 
 [[ -f "$model" ]] || { echo "model is not readable: $model" >&2; exit 66; }
 [[ -x "$release_dir/llama-server" ]] || {
@@ -130,8 +131,6 @@ if [[ -n "$suite" && pinchbench_max_tokens -ge ctx_size ]]; then
 fi
 
 mkdir -p "$output_dir"
-export NO_PROXY="127.0.0.1,localhost,::1${NO_PROXY:+,$NO_PROXY}"
-export no_proxy="$NO_PROXY"
 
 server_name="llama-sycl-qwen36-${port}-$$"
 server_log="$output_dir/server.log"
@@ -160,6 +159,18 @@ restore_openclaw_provider() {
     # leaving a global OpenClaw endpoint that dies with this temporary server.
     openclaw config unset "models.providers.${openclaw_sycl_provider_id}" \
         >/dev/null 2>&1 || true
+}
+
+sync_openclaw_gateway_proxy_environment() {
+    local gateway_service=${OPENCLAW_GATEWAY_SERVICE:-openclaw-gateway.service}
+    [[ "${OPENCLAW_SYNC_GATEWAY_PROXY:-true}" == true ]] || return 0
+    command -v systemctl >/dev/null || {
+        echo "systemctl is required to synchronize the OpenClaw Gateway proxy environment" >&2
+        return 127
+    }
+    systemctl --user import-environment \
+        HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy
+    systemctl --user restart "$gateway_service"
 }
 
 write_effective_config() {
@@ -210,7 +221,7 @@ write_effective_config() {
 cleanup() {
     local exit_status=$?
     if [[ "$status_finalized" != true ]]; then
-        printf 'failed %s exit=%s\n' "$(date -u +%FT%TZ)" "$exit_status" > "$status_file" || true
+        printf 'failed %s exit=%s\n' "$(date -u +%FT%TZ)" "$exit_status" >> "$status_file" || true
     fi
     restore_openclaw_provider
     restore_mid_turn_precheck
@@ -264,6 +275,9 @@ if [[ -n "$suite" ]]; then
     # PinchBench's isolated OpenClaw agent receives the server's actual
     # context contract and its per-agent tool-result cap from this helper.
     configure_openclaw_sycl_pinchbench
+    # The benchmark agent runs embedded and inherits the exports above.  The
+    # active Gateway is synchronized too, for OpenClaw operations that use it.
+    sync_openclaw_gateway_proxy_environment
     openclaw_provider_configured=true
 
     # OpenClaw otherwise evaluates raw tool payloads in its tool-loop guard
@@ -307,7 +321,7 @@ if [[ -n "$suite" ]]; then
     set -e
 
     printf 'completed %s mode=pinchbench suite=%s benchmark_exit=%s\n' \
-        "$(date -u +%FT%TZ)" "$suite" "$benchmark_status" > "$status_file"
+        "$(date -u +%FT%TZ)" "$suite" "$benchmark_status" >> "$status_file"
     status_finalized=true
     exit "$benchmark_status"
 fi
@@ -320,7 +334,8 @@ python3 "$workspace/scripts/measure_llamacpp_context_streaming.py" \
     --backend-args "official llama.cpp SYCL ${release_variant}; release_dir=${release_dir}; oneAPI_runtime=${oneapi_runtime_root}; image=${image}; ${llama_sycl_device_selector}; GGML_SYCL_ENABLE_LEVEL_ZERO=1; --threads ${llama_sycl_threads}; --threads-batch ${llama_sycl_threads_batch}; --gpu-layers ${llama_sycl_gpu_layers}; --cache-ram ${llama_sycl_cache_ram}; MTP draft" \
     --ctx-size "$ctx_size" --runs "$runs" --warmup-runs "$warmup_runs" \
     --short-input-words "$short_words" --long-input-words "$long_words" \
-    --max-tokens "$max_tokens" --cpu-pid "$server_host_pid"
+    --max-tokens "$max_tokens" --cpu-pid "$server_host_pid" \
+    --require-server-timings --output-filename "bench-sycl-qwen36-35b-context.json"
 
-printf 'completed %s\n' "$(date -u +%FT%TZ)" > "$status_file"
+printf 'completed %s\n' "$(date -u +%FT%TZ)" >> "$status_file"
 status_finalized=true
