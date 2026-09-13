@@ -801,6 +801,7 @@ def _read_workspace_files(workspace_path: str, *, task_id: str = "") -> str:
     evidence_files = _TASK_WORKSPACE_EVIDENCE_FILES.get(task_id)
     file_contents: List[str] = []
     total_chars = 0
+    omitted_due_to_total_cap = False
     for f in sorted(workspace.rglob("*")):
         if not f.is_file():
             continue
@@ -821,6 +822,7 @@ def _read_workspace_files(workspace_path: str, *, task_id: str = "") -> str:
             - len(section_header)
         )
         if remaining <= 0:
+            omitted_due_to_total_cap = True
             break
         content_limit = min(_JUDGE_EVIDENCE_MAX_FILE_CHARS, remaining)
         try:
@@ -839,7 +841,14 @@ def _read_workspace_files(workspace_path: str, *, task_id: str = "") -> str:
             total_chars += len(separator) + len(section)
         except (OSError, UnicodeDecodeError):
             pass
-    return "\n\n".join(file_contents)
+    evidence = "\n\n".join(file_contents)
+    if omitted_due_to_total_cap:
+        marker = _JUDGE_EVIDENCE_TRUNCATION_MARKER
+        max_chars = _JUDGE_EVIDENCE_MAX_TOTAL_CHARS
+        if max_chars <= len(marker):
+            return marker[:max_chars]
+        evidence = evidence[: max_chars - len(marker)] + marker
+    return evidence
 
 
 def _build_judge_prompt(
