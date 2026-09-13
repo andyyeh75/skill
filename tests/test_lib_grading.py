@@ -194,6 +194,22 @@ class WorkspaceFilesForJudgeTests(unittest.TestCase):
         self.assertLessEqual(len(content), 140)
         self.assertIn("[Judge evidence truncated to fit context]", content)
 
+    def test_workspace_evidence_marks_files_omitted_when_next_header_cannot_fit(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            (workspace / "first.txt").write_text("A" * 90, encoding="utf-8")
+            (workspace / "second.txt").write_text("B" * 90, encoding="utf-8")
+
+            with patch.object(lib_grading, "_JUDGE_EVIDENCE_MAX_FILE_CHARS", 100), patch.object(
+                lib_grading, "_JUDGE_EVIDENCE_MAX_TOTAL_CHARS", 130
+            ):
+                content = _read_workspace_files(str(workspace))
+
+        self.assertLessEqual(len(content), 130)
+        self.assertIn("### File: first.txt", content)
+        self.assertNotIn("### File: second.txt", content)
+        self.assertTrue(content.endswith("[Judge evidence truncated to fit context]"))
+
     def test_video_transcript_evidence_excludes_generated_intermediates(self) -> None:
         with TemporaryDirectory() as tmp_dir:
             workspace = Path(tmp_dir)
